@@ -129,7 +129,8 @@ at run time and then broken in one specific way. (The eight files under
 `manual-test/fixtures/` are committed, because those are for testing by hand.)
 
 ```
-python3 -m pytest                     # 63 pass, 1 skip — needs nothing installed
+pip install pytest                    # the runner; the engine itself needs nothing
+python3 -m pytest                     # 63 pass, 1 skip — on a clone with nothing else
 pip install -e ".[web,dev]"
 python3 -m pytest                     # 76 pass — adds the endpoint tests
 cd frontend && npm install && npm test # 46 pass — the page, rendered and driven

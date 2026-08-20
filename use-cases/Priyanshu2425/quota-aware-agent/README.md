@@ -11,20 +11,23 @@ through someone's document.
 
 ## Setup and test
 
-**Zero setup to see it work.** No key, no network, no install — the transport is
-injected and the tests answer with a documented fake, so nothing here costs an
-operation:
+**Zero setup to see it work.** No key, no network, and nothing to install but a
+test runner — the transport is injected and the tests answer with a documented
+fake, so nothing here costs an operation:
 
 ```bash
 git clone https://github.com/superdocsapp/superdocs-builds.git
 cd superdocs-builds/use-cases/Priyanshu2425/quota-aware-agent
 
-python3 -m pytest        # 71 passed, 1 skipped — the one skip is the MCP protocol check
 python3 backend/demo.py  # watch it plan, size the work, run it, and export
+
+pip install pytest       # the one thing a bare clone does not already carry
+python3 -m pytest        # 71 passed, 1 skipped — the one skip is the MCP protocol check
 ```
 
 Python 3.10 or newer. There are **no runtime dependencies** — that is why the
-two commands above work on a clone with nothing installed.
+demo runs on a clone with nothing installed at all, and why `pytest` is the only
+thing the suite asks you to add.
 
 <details>
 <summary><b>The MCP surface</b> — one extra install</summary>
