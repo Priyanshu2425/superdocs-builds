@@ -221,7 +221,7 @@ and the stopping rule above.
 No key, no network, nothing to install:
 
 ```
-python3 -m pytest                 # 69 tests, offline
+python3 -m pytest                 # 71 passed, 1 skipped — offline, no key
 python3 backend/demo.py                   # allowance is plentiful — everything runs
 python3 backend/demo.py --scenario tight  # not enough — it degrades and explains
 python3 backend/demo.py --scenario broke  # nothing fits — it refuses to start
