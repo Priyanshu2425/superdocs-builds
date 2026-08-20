@@ -2,8 +2,10 @@ LICENSE
 README.md
 pyproject.toml
 backend/docrepair/__init__.py
+backend/docrepair/corpus.py
 backend/docrepair/docx.py
 backend/docrepair/engine.py
+backend/docrepair/measure.py
 backend/docrepair/media.py
 backend/docrepair/salvage.py
 backend/docrepair/styled_export.py
@@ -14,6 +16,7 @@ backend/word_doc_repair.egg-info/SOURCES.txt
 backend/word_doc_repair.egg-info/dependency_links.txt
 backend/word_doc_repair.egg-info/requires.txt
 backend/word_doc_repair.egg-info/top_level.txt
+tests/test_corpus.py
 tests/test_frontend_fixtures.py
 tests/test_repair.py
 tests/test_styled_export.py

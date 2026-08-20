@@ -23,6 +23,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -73,12 +74,42 @@ def salvage_members(data: bytes) -> Salvage:
     # The happy path first: a readable archive.
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
-            bad = z.testzip()
-            for name in z.namelist():
+            try:
+                bad = z.testzip()
+            except zlib.error:
+                # Damage *inside* a member's compressed stream. `testzip` raises
+                # instead of naming it, and an uncaught raise here reached the
+                # web endpoint as a 500 on a bit-rotted file -- BUG-065. The
+                # name comes from the per-member reads below instead.
+                bad = "?"
+            failed = []
+            for info in z.infolist():
+                name = info.filename
                 try:
-                    out.members[name] = z.read(name)
+                    content = z.read(info)
                 except Exception:
-                    out.lost(f"one section of the file ({name}) is present but its data is unreadable")
+                    failed.append(name)
+                    continue
+                # A name can appear twice in one archive -- CVE-2025-31672's
+                # shape, and what a bad merge or a partial overwrite leaves
+                # behind. `read(name)` answers with whichever copy the index
+                # lists last, which may be the empty one. Keep the copy with
+                # something in it: the owner's words are in the archive either
+                # way, and choosing the emptier copy would lose them on a file
+                # that was never really damaged.
+                if len(content) >= len(out.members.get(name, b"")):
+                    out.members[name] = content
+            if failed:
+                # The index was readable and a member was not. `read` throws
+                # away everything it had already inflated when a stream goes
+                # bad partway; the local-header pass keeps that prefix, which
+                # on rot in the middle of a body is the difference between half
+                # a document and none of it.
+                _recover_by_local_headers(data, out)
+                for name in failed:
+                    if name not in out.members:
+                        out.lost(f"one section of the file ({name}) is present "
+                                 "but its data is unreadable")
             if bad:
                 out.note("part of the file failed its integrity check; read what was readable")
             elif out.members and not out.unrecovered:
@@ -101,6 +132,24 @@ def salvage_members(data: bytes) -> Salvage:
     return out
 
 
+def _inflate_as_far_as_it_goes(body: bytes) -> tuple[bytes, bool]:
+    """Inflate a stream, keeping whatever came out before it went wrong.
+
+    `decompressobj().decompress(whole)` raises when the damage is *inside* the
+    stream, and throws away everything it had already produced along with it.
+    Feeding it in chunks keeps the prefix. For bit rot in the middle of a body
+    that is the difference between half a document and none of it.
+    """
+    obj = zlib.decompressobj(-zlib.MAX_WBITS)
+    out = bytearray()
+    for i in range(0, len(body), 4096):
+        try:
+            out += obj.decompress(body[i:i + 4096])
+        except zlib.error:
+            return bytes(out), True
+    return bytes(out), False
+
+
 def _recover_by_local_headers(data: bytes, out: "Salvage") -> tuple[int, int]:
     """Walk the local file headers and inflate what each one points at.
 
@@ -109,7 +158,6 @@ def _recover_by_local_headers(data: bytes, out: "Salvage") -> tuple[int, int]:
     local header carries its own name, method and sizes, which is enough.
     """
     import struct
-    import zlib
 
     found = partial = 0
     for match in re.finditer(re.escape(_LOCAL_HEADER), data):
@@ -144,17 +192,13 @@ def _recover_by_local_headers(data: bytes, out: "Salvage") -> tuple[int, int]:
             body = data[body_start:body_start + comp_size]
 
         was_short = len(body) < comp_size
-        try:
-            if method == 0:
-                content = body
-            elif method == 8:
-                # decompressobj, not decompress: a truncated stream still yields
-                # everything up to the cut instead of raising.
-                content = zlib.decompressobj(-zlib.MAX_WBITS).decompress(body)
-            else:
-                continue
-        except zlib.error:
+        if method == 0:
+            content, went_bad = body, False
+        elif method == 8:
+            content, went_bad = _inflate_as_far_as_it_goes(body)
+        else:
             continue
+        was_short = was_short or went_bad
 
         if not content:
             continue
@@ -182,6 +226,11 @@ def repair_xml(raw: bytes) -> tuple[bytes, list[str]]:
         fixed = fixed[3:]
         notes.append("removed a byte-order mark that was placed before the XML declaration")
 
+    fixed, fixed_decl = _repair_declaration(fixed)
+    if fixed_decl:
+        notes.append("repaired the line at the top of the document that says how it "
+                     "is encoded")
+
     cleaned, n = _ILLEGAL_XML.subn(b"", fixed)
     if n:
         fixed = cleaned
@@ -199,6 +248,30 @@ def repair_xml(raw: bytes) -> tuple[bytes, list[str]]:
             f"closed {plural(len(added), 'element')} that the damage had left open")
 
     return fixed, notes
+
+
+_DECLARATION = re.compile(rb"^<\?xml[^>]*\?>")
+_GOOD_DECLARATION = re.compile(
+    rb'^<\?xml\s+version="1\.[0-9]"'
+    rb'(?:\s+encoding="(?:UTF-8|utf-8|UTF-16|utf-16)")?'
+    rb'(?:\s+standalone="(?:yes|no)")?\s*\?>')
+_STANDARD = b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+
+
+def _repair_declaration(raw: bytes) -> tuple[bytes, bool]:
+    """Replace a declaration a parser will refuse with the standard one.
+
+    An encoding that does not exist, an unquoted attribute, a misspelt
+    `standalone` -- a strict parser rejects the whole document over any of
+    them, and none of them says anything about the owner's words. The parts
+    this package writes are UTF-8, and a part it is reading declared something
+    a parser would not accept is a part whose declaration cannot be trusted
+    anyway, so it is replaced rather than patched.
+    """
+    match = _DECLARATION.match(raw)
+    if not match or _GOOD_DECLARATION.match(raw):
+        return raw, False
+    return _STANDARD + raw[match.end():], True
 
 
 def _close_open_tags(raw: bytes) -> tuple[bytes, list[str]]:
@@ -235,18 +308,36 @@ def _close_open_tags(raw: bytes) -> tuple[bytes, list[str]]:
     return raw + tail.encode("utf-8"), list(reversed(stack))
 
 
+#: A text run, anchored so it cannot also match `<w:tbl>`, `<w:tr>` or `<w:tc>`.
+#: The unanchored `<w:t[^>]*>` matches all three, and then runs to the next
+#: `</w:t>` -- which on a document with a table pastes the table's own markup
+#: into the recovered text as if the owner had typed it. BUG-066.
+_TEXT_RUN = re.compile(rb"<w:t(?:\s[^>]*)?>(.*?)</w:t>", re.S)
+_PARA_END = re.compile(rb"</w:p\s*>")
+
+
 def text_runs(document_xml: bytes) -> list[str]:
     """Last resort: pull the text out of `<w:t>` runs with a regex.
 
     Used when the XML is too damaged to parse even after repair. It loses all
     structure, which is exactly why the report says so rather than presenting
     the result as a recovered document.
+
+    One paragraph per entry, and the runs inside a paragraph are joined with
+    nothing between them: Word starts a new run wherever formatting changes,
+    including in the middle of a word, so *adipiscing* is stored as `adi` plus
+    `piscing` and a separator between them invents a space the document never
+    had.
     """
-    return [
-        _unescape(m.group(1).decode("utf-8", errors="replace"))
-        for m in re.finditer(rb"<w:t[^>]*>(.*?)</w:t>", document_xml, re.S)
-        if m.group(1).strip()
-    ]
+    out: list[str] = []
+    for para in _PARA_END.split(document_xml):
+        text = "".join(
+            _unescape(m.group(1).decode("utf-8", errors="replace"))
+            for m in _TEXT_RUN.finditer(para)
+        )
+        if text.strip():
+            out.append(text)
+    return out
 
 
 def _unescape(s: str) -> str:
