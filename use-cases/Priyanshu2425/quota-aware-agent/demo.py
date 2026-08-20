@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Run the agent. With no key it runs against a documented fake, so a reviewer
+can see the behaviour without spending an operation.
+
+    python3 demo.py                     # offline, against the fake
+    python3 demo.py --scenario tight    # not enough allowance: it degrades
+    python3 demo.py --scenario broke    # no allowance: it refuses to start
+    python3 demo.py --live              # real API, needs SUPERDOCS_API_KEY
+
+    --sample N   small-sample mode: run at most N steps
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+from quota_aware_agent.policy import Policy
+from quota_aware_agent import QuotaAwareAgent, Step, SuperDocsClient
+from quota_aware_agent.client import HttpTransport
+
+WORK = [
+    Step("figures", "Correct the revenue figures in the summary table.", 25, "critical"),
+    Step("dates",   "Fix the effective dates in section 3.",             25, "high"),
+    Step("terms",   "Align the defined terms with the glossary.",        25, "medium"),
+    Step("footer",  "Tidy the footer and page numbering.",               25, "low"),
+]
+
+SCENARIOS = {"roomy": 500, "tight": 3, "broke": 1}
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--scenario", choices=sorted(SCENARIOS), default="roomy")
+    p.add_argument("--live", action="store_true", help="use the real API")
+    p.add_argument("--sample", type=int, default=None, help="run at most N steps")
+    p.add_argument("--file", default="contract.docx")
+    p.add_argument("--receipt", action="store_true",
+                   help="print the line items and whether they add up")
+    a = p.parse_args(argv)
+
+    if a.live:
+        key = os.environ.get("SUPERDOCS_API_KEY")
+        if not key:
+            print("SUPERDOCS_API_KEY is not set. Run without --live to use the fake.",
+                  file=sys.stderr)
+            return 2
+        transport = HttpTransport(key)
+        sleep = None
+        print("Running against the real API. Operations will be billed.\n")
+    else:
+        from tests.fake import FakeSuperDocs
+        transport = FakeSuperDocs(remaining=SCENARIOS[a.scenario])
+        sleep = lambda s: None
+        print(f"Offline demo, scenario '{a.scenario}': "
+              f"{SCENARIOS[a.scenario]} operation(s) of allowance. Nothing is billed.\n")
+
+    client = SuperDocsClient(transport, **({"sleep": sleep} if sleep else {}))
+    agent = QuotaAwareAgent(client, policy=Policy(reserve=1, max_steps=a.sample))
+
+    content = b"<h1>Quarterly report</h1><p>...</p>"
+    report = agent.run("demo-session", a.file, content, WORK)
+
+    print(report.plain_language())
+    print()
+    print(f"  planned:   {report.planned or '-'}")
+    print(f"  completed: {report.completed or '-'}")
+    print(f"  deferred:  {report.deferred or '-'}")
+    print(f"  stopped:   {report.stop_reason.value}")
+    if a.receipt:
+        print()
+        print(report.receipt.render_text(report.balance_at_start,
+                                         report.balance_at_end))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,31 @@
+{
+  "name": "not-a-word-file",
+  "filename": "06-not-a-word-file.docx",
+  "events": [
+    {
+      "stage": "open",
+      "message": "Opening the file…"
+    },
+    {
+      "stage": "open",
+      "message": "The file's internal index was damaged — this is what Word reports as a corrupt document — so the content was read directly from inside it."
+    },
+    {
+      "stage": "open",
+      "message": "No readable parts were found inside the file."
+    }
+  ],
+  "report": {
+    "ok": false,
+    "summary": "This file could not be repaired. No readable parts could be found inside the file. Nothing was invented to fill the gap — if there is another copy, even an older one, that is the better starting point.",
+    "recovered": [],
+    "lost": [
+      "no readable parts could be found inside the file"
+    ],
+    "counts": {},
+    "structure_preserved": true,
+    "filename": "06-not-a-word-file-repaired.docx",
+    "preview_html": "",
+    "download": null
+  }
+}

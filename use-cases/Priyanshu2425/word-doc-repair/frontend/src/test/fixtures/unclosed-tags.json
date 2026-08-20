@@ -1,0 +1,67 @@
+{
+  "name": "unclosed-tags",
+  "filename": "03-unclosed-tags.docx",
+  "events": [
+    {
+      "stage": "open",
+      "message": "Opening the file…"
+    },
+    {
+      "stage": "open",
+      "message": "The container opened cleanly."
+    },
+    {
+      "stage": "inventory",
+      "message": "Found 5 sections inside the document."
+    },
+    {
+      "stage": "xml",
+      "message": "Checking the document body for damage…"
+    },
+    {
+      "stage": "xml",
+      "message": "Closed 6 elements that the damage had left open."
+    },
+    {
+      "stage": "read",
+      "message": "Reading headings, paragraphs and tables…"
+    },
+    {
+      "stage": "read",
+      "message": "The document's structure was too damaged to read. Recovering the text on its own instead."
+    },
+    {
+      "stage": "read",
+      "message": "Recovered 6 paragraphs."
+    },
+    {
+      "stage": "write",
+      "message": "Rebuilding a clean Word file…"
+    },
+    {
+      "stage": "done",
+      "message": "Done. The rebuilt file is ready to download."
+    }
+  ],
+  "report": {
+    "ok": true,
+    "summary": "Recovered what could be read and rebuilt it as a valid Word file. This is a best-effort recovery, not a complete repair. The document's structure was too damaged to read, so the text was extracted run by run — you are getting the words back, but the headings, tables and formatting are gone.",
+    "recovered": [
+      "closed 6 elements that the damage had left open",
+      "recovered the text of 6 paragraphs"
+    ],
+    "lost": [
+      "the document structure was unreadable, so headings, tables and formatting could not be preserved — only the text was recovered"
+    ],
+    "counts": {
+      "headings": 0,
+      "paragraphs": 6,
+      "tables": 0,
+      "pictures": 0
+    },
+    "structure_preserved": false,
+    "filename": "03-unclosed-tags-repaired.docx",
+    "preview_html": "<p>Quarterly Report</p>\n<p>Revenue rose in Q3 — driven by renewals &amp; upsell.</p>\n<p>Regional breakdown</p>\n<p>&lt;w:tblPr&gt;&lt;w:tblStyle w:val=\"TableGrid\"/&gt;&lt;w:tblW w:w=\"0\" w:type=\"auto\"/&gt;&lt;w:tblBorders&gt;&lt;w:top w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/&gt;&lt;w:left w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/&gt;&lt;w:bottom w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/&gt;&lt;w:right w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/&gt;&lt;w:insideH w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/&gt;&lt;w:insideV w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/&gt;&lt;/w:tblBorders&gt;&lt;/w:tblPr&gt;&lt;w:tr&gt;&lt;w:tc&gt;&lt;w:tcPr&gt;&lt;w:tcW w:w=\"0\" w:type=\"auto\"/&gt;&lt;/w:tcPr&gt;&lt;w:p&gt;&lt;w:r&gt;&lt;w:t xml:space=\"preserve\"&gt;Region</p>\n<p>&lt;w:tcPr&gt;&lt;w:tcW w:w=\"0\" w:type=\"auto\"/&gt;&lt;/w:tcPr&gt;&lt;w:p&gt;&lt;w:r&gt;&lt;w:t xml:space=\"preserve\"&gt;Revenue</p>\n<p>&lt;w:tc&gt;&lt;w:tcPr&gt;&lt;w:tcW w:w=\"0\" w:type=\"auto\"/&gt;&lt;/w:tcPr&gt;&lt;w:p&gt;&lt;w:r&gt;&lt;w:t xml:space=\"preserve\"&gt;EMEA</p>",
+    "download": "/api/download/unclosed-tags-token"
+  }
+}

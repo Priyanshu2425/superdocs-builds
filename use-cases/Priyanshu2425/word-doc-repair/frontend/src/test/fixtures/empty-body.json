@@ -1,0 +1,47 @@
+{
+  "name": "empty-body",
+  "filename": "07-empty-body.docx",
+  "events": [
+    {
+      "stage": "open",
+      "message": "Opening the file…"
+    },
+    {
+      "stage": "open",
+      "message": "The container opened cleanly."
+    },
+    {
+      "stage": "inventory",
+      "message": "Found 5 sections inside the document."
+    },
+    {
+      "stage": "xml",
+      "message": "Checking the document body for damage…"
+    },
+    {
+      "stage": "xml",
+      "message": "The document body was well-formed."
+    },
+    {
+      "stage": "read",
+      "message": "Reading headings, paragraphs and tables…"
+    },
+    {
+      "stage": "read",
+      "message": "No readable content was found in the document body."
+    }
+  ],
+  "report": {
+    "ok": false,
+    "summary": "This file could not be repaired. The document body contained no readable text. Nothing was invented to fill the gap — if there is another copy, even an older one, that is the better starting point.",
+    "recovered": [],
+    "lost": [
+      "the document body contained no readable text"
+    ],
+    "counts": {},
+    "structure_preserved": true,
+    "filename": "07-empty-body-repaired.docx",
+    "preview_html": "",
+    "download": null
+  }
+}

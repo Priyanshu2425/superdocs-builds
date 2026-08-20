@@ -1,0 +1,60 @@
+{
+  "name": "healthy",
+  "filename": "00-healthy.docx",
+  "events": [
+    {
+      "stage": "open",
+      "message": "Opening the file…"
+    },
+    {
+      "stage": "open",
+      "message": "The container opened cleanly."
+    },
+    {
+      "stage": "inventory",
+      "message": "Found 5 sections inside the document."
+    },
+    {
+      "stage": "xml",
+      "message": "Checking the document body for damage…"
+    },
+    {
+      "stage": "xml",
+      "message": "The document body was well-formed."
+    },
+    {
+      "stage": "read",
+      "message": "Reading headings, paragraphs and tables…"
+    },
+    {
+      "stage": "read",
+      "message": "Recovered 2 headings, 2 paragraphs and 1 table."
+    },
+    {
+      "stage": "write",
+      "message": "Rebuilding a clean Word file…"
+    },
+    {
+      "stage": "done",
+      "message": "Done. The rebuilt file is ready to download."
+    }
+  ],
+  "report": {
+    "ok": true,
+    "summary": "Recovered what could be read and rebuilt it as a valid Word file. This is a best-effort recovery, not a complete repair.",
+    "recovered": [
+      "kept 2 headings, 2 paragraphs and 1 table, with their structure intact"
+    ],
+    "lost": [],
+    "counts": {
+      "headings": 2,
+      "paragraphs": 2,
+      "tables": 1,
+      "pictures": 0
+    },
+    "structure_preserved": true,
+    "filename": "00-healthy-repaired.docx",
+    "preview_html": "<h1>Quarterly Report</h1>\n<p>Revenue rose in Q3 — driven by renewals &amp; upsell.</p>\n<h2>Regional breakdown</h2>\n<table><tr><td>Region</td><td>Revenue</td></tr><tr><td>EMEA</td><td>1.2M</td></tr><tr><td>APAC</td><td>0.8M</td></tr></table>\n<p>Prepared by the finance team.</p>",
+    "download": "/api/download/healthy-token"
+  }
+}

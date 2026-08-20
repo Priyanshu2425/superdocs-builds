@@ -1,0 +1,78 @@
+{
+  "name": "illustrated",
+  "filename": "08-illustrated.docx",
+  "events": [
+    {
+      "stage": "open",
+      "message": "Opening the file…"
+    },
+    {
+      "stage": "open",
+      "message": "The container opened cleanly."
+    },
+    {
+      "stage": "inventory",
+      "message": "Found 9 sections inside the document."
+    },
+    {
+      "stage": "xml",
+      "message": "Checking the document body for damage…"
+    },
+    {
+      "stage": "xml",
+      "message": "The document body was well-formed."
+    },
+    {
+      "stage": "read",
+      "message": "Reading headings, paragraphs and tables…"
+    },
+    {
+      "stage": "read",
+      "message": "Recovering the footnotes…"
+    },
+    {
+      "stage": "read",
+      "message": "Recovering the page header…"
+    },
+    {
+      "stage": "read",
+      "message": "Recovering the page footer…"
+    },
+    {
+      "stage": "read",
+      "message": "Recovered 4 headings, 5 paragraphs and 1 picture."
+    },
+    {
+      "stage": "write",
+      "message": "Rebuilding a clean Word file…"
+    },
+    {
+      "stage": "done",
+      "message": "Done. The rebuilt file is ready to download."
+    }
+  ],
+  "report": {
+    "ok": true,
+    "summary": "Recovered what could be read and rebuilt it as a valid Word file. This is a best-effort recovery, not a complete repair.",
+    "recovered": [
+      "kept 4 headings, 5 paragraphs and 1 picture, with their structure intact",
+      "carried 1 picture back into the document, where it was",
+      "recovered the footnotes",
+      "recovered the page header",
+      "recovered the page footer"
+    ],
+    "lost": [
+      "footnotes, headers and footers could not be put back into their original places, so their text is set down at the end of the document under its own heading"
+    ],
+    "counts": {
+      "headings": 4,
+      "paragraphs": 5,
+      "tables": 0,
+      "pictures": 1
+    },
+    "structure_preserved": true,
+    "filename": "08-illustrated-repaired.docx",
+    "preview_html": "<h1>Site inspection</h1>\n<p>The east elevation, photographed on arrival:</p>\n<img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAGCAIAAABxZ0isAAAAEUlEQVR4nGM4oaGBFTEMpAQAgPc0gUXKIv0AAAAASUVORK5CYII=\" alt=\"A picture recovered from your document\">\n<p>No further defects were observed.</p>\n<h2>Footnotes, recovered separately</h2>\n<p>Measurements taken with a laser rangefinder.</p>\n<h2>Page header, recovered separately</h2>\n<p>Inspection report — draft</p>\n<h2>Page footer, recovered separately</h2>\n<p>Page 1 of 1</p>",
+    "download": "/api/download/illustrated-token"
+  }
+}

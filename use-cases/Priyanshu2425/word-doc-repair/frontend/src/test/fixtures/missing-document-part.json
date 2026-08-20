@@ -1,0 +1,35 @@
+{
+  "name": "missing-document-part",
+  "filename": "05-missing-document-part.docx",
+  "events": [
+    {
+      "stage": "open",
+      "message": "Opening the file…"
+    },
+    {
+      "stage": "open",
+      "message": "The container opened cleanly."
+    },
+    {
+      "stage": "inventory",
+      "message": "Found 4 sections inside the document."
+    },
+    {
+      "stage": "inventory",
+      "message": "The main document part is missing and cannot be rebuilt."
+    }
+  ],
+  "report": {
+    "ok": false,
+    "summary": "This file could not be repaired. The main document part is missing entirely, so there is no text to recover. Nothing was invented to fill the gap — if there is another copy, even an older one, that is the better starting point.",
+    "recovered": [],
+    "lost": [
+      "the main document part is missing entirely, so there is no text to recover"
+    ],
+    "counts": {},
+    "structure_preserved": true,
+    "filename": "05-missing-document-part-repaired.docx",
+    "preview_html": "",
+    "download": null
+  }
+}

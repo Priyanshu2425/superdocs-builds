@@ -1,0 +1,9 @@
+# Build artefacts from running the two projects in this folder. Kept here
+# rather than at the repository root, because CONTRIBUTING.md asks each builder
+# to change nothing outside their own folder.
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+*.tsbuildinfo
+.DS_Store
