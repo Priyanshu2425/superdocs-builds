@@ -68,7 +68,7 @@ def _encode_multipart(files: dict, fields: dict) -> tuple[bytes, str]:
         digest.update(name.encode())
         digest.update(str(filename).encode())
         digest.update(content if isinstance(content, bytes) else str(content).encode())
-    boundary = "----attest" + digest.hexdigest()[:24]
+    boundary = "----formdata" + digest.hexdigest()[:24]
 
     out = bytearray()
     for name, value in fields.items():

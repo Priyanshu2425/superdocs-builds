@@ -1,10 +1,10 @@
 """BudgetGuard -- never start work you cannot finish.
 
-SHARED CORE. This module is used unchanged by "Attest", the document-analysis
-system built for Problem 01 of the same round, where it guards the publisher.
-It is vendored here rather than imported so this build stands alone in the
-builds repository. Reuse is only a shortcut when it is hidden, so it is stated
-here, in the README, and in the write-up.
+SHARED CORE. This module is used unchanged by another system by the same
+author, where it guards the publisher that writes documents back to SuperDocs.
+It is vendored here rather than imported so this build stands alone in its own
+repository. Reuse is only a shortcut when it is hidden, so it is stated here and
+in the README.
 
 Grounded in the SuperDocs documentation rather than in the task brief
 (TASK.md rule 1). Two facts from the docs shape this module:

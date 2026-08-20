@@ -210,10 +210,10 @@ envelope and a `usage` block on every billable response.
 
 ## Shared core — stated plainly
 
-`quota_aware_agent/budget.py` is shared, unchanged, with **Attest**, the
-document-analysis system I built for Problem 01 of the same round, where it
-guards the publisher that writes back to SuperDocs. It is vendored here rather
-than imported so this build stands alone in the builds repository.
+`quota_aware_agent/budget.py` is shared, unchanged, with another system by the
+same author, where it guards the publisher that writes documents back to
+SuperDocs. It is vendored here rather than imported so this build stands alone
+in this repository.
 
 Reuse is only a shortcut when it is hidden. The same module solving both
 problems is the argument that the abstraction is right: "never start work you
