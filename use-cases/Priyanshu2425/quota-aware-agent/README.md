@@ -16,7 +16,11 @@ test runner — the transport is injected and the tests answer with a documented
 fake, so nothing here costs an operation:
 
 ```bash
-git clone https://github.com/superdocsapp/superdocs-builds.git
+# Until the pull request lands, this build lives on the fork's branch. After it
+# merges, the same two lines work against superdocsapp/superdocs-builds with no
+# --branch, because the path inside the repository does not move.
+git clone --branch priyanshu-semwal-builds \
+  https://github.com/Priyanshu2425/superdocs-builds.git
 cd superdocs-builds/use-cases/Priyanshu2425/quota-aware-agent
 
 python3 backend/demo.py  # watch it plan, size the work, run it, and export

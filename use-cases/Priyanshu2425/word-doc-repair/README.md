@@ -123,7 +123,12 @@ change the page — the built bundle is committed, so running it needs no Node a
 no network.
 
 ```
-git clone <this repo> && cd use-cases/Priyanshu2425/word-doc-repair
+# Until the pull request lands, this build lives on the fork's branch. After it
+# merges, drop the --branch and clone superdocsapp/superdocs-builds instead —
+# the path inside the repository does not move.
+git clone --branch priyanshu-semwal-builds \
+  https://github.com/Priyanshu2425/superdocs-builds.git
+cd superdocs-builds/use-cases/Priyanshu2425/word-doc-repair
 
 python3 -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -e ".[web,dev]"
