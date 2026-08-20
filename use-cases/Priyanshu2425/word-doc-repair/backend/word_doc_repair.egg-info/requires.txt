@@ -1,0 +1,9 @@
+
+[dev]
+pytest
+httpx2
+
+[web]
+fastapi
+uvicorn
+python-multipart

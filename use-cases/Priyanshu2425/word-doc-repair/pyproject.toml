@@ -7,7 +7,11 @@ dependencies = []
 
 [project.optional-dependencies]
 web = ["fastapi", "uvicorn", "python-multipart"]
-dev = ["pytest"]
+# `httpx2` is what `starlette.testclient` drives the app with. It is listed
+# because leaving it out did not skip the endpoint tests -- it interrupted
+# collection, so `pip install -e ".[web,dev]" && pytest` ran *no* tests at all
+# for anybody following the README. See BUG-057.
+dev = ["pytest", "httpx2"]
 
 [build-system]
 requires = ["setuptools>=68"]

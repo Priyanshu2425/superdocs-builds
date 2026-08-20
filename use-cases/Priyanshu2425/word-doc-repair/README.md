@@ -79,56 +79,109 @@ and **every failure on the SuperDocs path degrades back to it**, which a test
 asserts for each failure in turn. Details under
 [Where SuperDocs fits](#where-superdocs-fits).
 
-## Run it
+## Set it up
 
-The web page — this is the product:
-
-```
-pip install -e ".[web]"
-python3 -m docrepair.web          # then open http://127.0.0.1:8000
-PORT=8077 python3 -m docrepair.web  # if 8000 is taken
-```
-
-The page is React and TypeScript, and **you do not need Node to run it** — the
-build emits one self-contained file into `backend/static/`, and that file is committed.
-
-The tests, which need nothing installed and no key:
+**Requirements.** Python 3.10 or newer, and nothing else. Node is needed only to
+change the page — the built bundle is committed, so running it needs no Node and
+no network.
 
 ```
-python3 -m pytest                 # 63 tests, offline
+git clone <this repo> && cd use-cases/Priyanshu2425/word-doc-repair
+
+python3 -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
+pip install -e ".[web,dev]"
+
+python3 -m docrepair.web                               # http://127.0.0.1:8000
 ```
 
-With the web extra installed, twelve more run the two endpoints as the page
-calls them — those skip rather than fail on a bare checkout:
+Open the address it prints and drop a damaged `.docx` on the page. That is the
+whole product; everything below is optional.
+
+| | |
+|---|---|
+| `PORT=8077 python3 -m docrepair.web` | if 8000 is taken |
+| `SUPERDOCS_API_KEY=sk_… python3 -m docrepair.web` | also offers the styled copy (see [Where SuperDocs fits](#where-superdocs-fits)) |
+| no key set | the page says styling is off, in a line, and the rest works exactly as before |
+
+Nothing is written to disk and nothing is retained: uploads and repaired files
+are held in memory for one download window and then dropped.
+
+Have a folder of them rather than one? The CLI is the same engine:
 
 ```
-pip install -e ".[web,dev]" && python3 -m pytest    # 76 tests
+python3 backend/cli.py broken.docx
+python3 backend/cli.py broken.docx -o fixed.docx
+python3 backend/cli.py *.docx --quiet
+python3 backend/cli.py broken.docx --via-superdocs      # needs SUPERDOCS_API_KEY
 ```
 
-To work on the page itself:
+## Test it
+
+Three commands, five files. **None of them needs an API key, a network or a
+bucket** — every SuperDocs failure and success is driven through an injected
+fake, and every DOCX the automated tests use is written by the tests themselves
+at run time and then broken in one specific way. (The eight files under
+`manual-test/fixtures/` are committed, because those are for testing by hand.)
+
+```
+python3 -m pytest                     # 63 pass, 1 skip — needs nothing installed
+pip install -e ".[web,dev]"
+python3 -m pytest                     # 76 pass — adds the endpoint tests
+cd frontend && npm install && npm test # 46 pass — the page, rendered and driven
+```
+
+| Suite | Count | What it holds |
+|---|---|---|
+| `tests/test_repair.py` | 31 | The engine, over a real DOCX broken eight specific ways. The assertion is never "it did not crash": the output is reopened, every required part checked, the body re-parsed, the table compared cell by cell against the original. |
+| `tests/test_styled_export.py` | 21 | The four SuperDocs calls, in order, and every way the path can fail — dead network, exhausted allowance, no job id, empty export, a job that never settles, an unreadable balance. Each one must degrade to the plain rebuild. |
+| `tests/test_web.py` | 13 | The two endpoints, called the way the page calls them. Skips rather than fails when the web extra is absent. |
+| `tests/test_frontend_fixtures.py` | 11 | Records the page's fixtures from real repairs and fails if they drift. |
+| `frontend/…/App.test.tsx` | 46 | The whole page rendered, answered with those recorded streams, driven through every path a person can take. |
+
+**The tests that matter most are the ones about honesty**, and they run over
+what is on the screen rather than over the engine's strings:
+
+- a missing document part **fails**, and says why
+- an empty body is a **failure**, not a success with no content
+- no user-visible string claims a complete, perfect or guaranteed repair —
+  with negations understood, because *"not a complete repair"* is the sentence
+  this build exists to say
+- structural parts the tool rebuilds are never reported as lost content
+- no engine vocabulary reaches a worried person — no `ZIP`, `XML`, `CRC`,
+  `central directory`, no exception class name
+- a styled copy whose wording changed is **thrown away**, not handed over
+
+That distinction — rendered output, not engine output — is not pedantry:
+BUG-014 was fixed in the engine and came straight back as BUG-020 in the page.
+
+**Working on the page itself:**
 
 ```
 cd frontend
 npm install
-npm test                          # 46 tests
-npm run build                     # rewrites static/index.html
+npm run dev        # vite on 5173, /api proxied to the engine on 8000
+                   # SALVAGE_API=http://127.0.0.1:8077 npm run dev  if you moved it
+npm test           # 46
+npm run build      # rewrites backend/static/index.html AND bundle-manifest.json
 ```
 
-Those 46 tests render the whole page and answer it with repair streams recorded
-from the real engine by `tests/test_frontend_fixtures.py`, which fails if the
-recordings drift. The honesty guards — no engine vocabulary, no promise of a
-complete repair, no "what came through" on a total failure — run over what is
-actually on the screen, for all ten recorded repairs. They used to run over
-the engine's strings, which is how BUG-014 was fixed and came straight back as
-BUG-020: a page can introduce copy the engine never produced.
+The bundle is committed so a reviewer with no Node still gets the product. The
+cost of that decision is that it can fall behind its source and nobody notices,
+so the build writes a hash over every source file and a pytest recomputes it.
+**Stale bundle, failed build** — if you change anything under `frontend/src`,
+run `npm run build` before committing.
 
-And a CLI, for a folder full of them. The engine is identical; the page is the
-product and this is the back door:
+**Checking it by hand.** Three pages, all openable straight from disk:
 
-```
-python3 backend/cli.py broken.docx
-python3 backend/cli.py *.docx --quiet
-```
+| File | What it is |
+|---|---|
+| `manual-test/index.html` | The interactive checklist — 19 items, verdicts persist across reloads, exports as Markdown |
+| `manual-test/MANUAL_QA_PLAN.html` | The record of an actual run against a live server, with what could not be run marked *not run* rather than passed |
+| `manual-test/UI_FLOWS.html` | Every path through the page, screen by screen |
+| `SYSTEM_DESIGN.html` | How it is built and why — the architecture, the two paths, the failure matrix |
+
+`manual-test/make_fixtures.py` regenerates the eight broken files in
+`manual-test/fixtures/` if you want fresh ones.
 
 ## How it is tested
 

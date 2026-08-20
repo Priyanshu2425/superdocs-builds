@@ -16,7 +16,16 @@ import pytest
 
 fastapi = pytest.importorskip("fastapi", reason="the web extra is not installed")
 pytest.importorskip("multipart", reason="the web extra is not installed")
-from fastapi.testclient import TestClient  # noqa: E402
+try:
+    from fastapi.testclient import TestClient
+except RuntimeError as missing:      # starlette raises this, it does not ImportError
+    # Skip, do not blow up collection. `importorskip` cannot help here: the
+    # import succeeds far enough to raise from inside starlette, and an
+    # uncaught raise at module scope interrupts the *whole* run rather than
+    # this file. That is BUG-057, and it is why this is a try rather than one
+    # more importorskip line.
+    pytest.skip(f"the web extra needs an HTTP client: {missing}",
+                allow_module_level=True)
 
 from docrepair import web  # noqa: E402
 from tests import broken  # noqa: E402

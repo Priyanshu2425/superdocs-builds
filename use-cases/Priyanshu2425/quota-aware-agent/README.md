@@ -9,6 +9,91 @@ through someone's document.
 
 ![The agent degrading, twice](screenshot.png)
 
+## Setup and test
+
+**Zero setup to see it work.** No key, no network, no install — the transport is
+injected and the tests answer with a documented fake, so nothing here costs an
+operation:
+
+```bash
+git clone https://github.com/superdocsapp/superdocs-builds.git
+cd superdocs-builds/use-cases/Priyanshu2425/quota-aware-agent
+
+python3 -m pytest        # 71 passed, 1 skipped — the one skip is the MCP protocol check
+python3 backend/demo.py  # watch it plan, size the work, run it, and export
+```
+
+Python 3.10 or newer. There are **no runtime dependencies** — that is why the
+two commands above work on a clone with nothing installed.
+
+<details>
+<summary><b>The MCP surface</b> — one extra install</summary>
+
+```bash
+pip install -e ".[mcp]"
+export SUPERDOCS_API_KEY=your-key-here    # placeholder; never commit a real key
+python3 -m quota_aware_agent.mcp_server   # stdio
+```
+
+Or register it with a client:
+
+```bash
+claude mcp add quota-aware-agent \
+  --env SUPERDOCS_API_KEY=your-key-here \
+  -- python3 -m quota_aware_agent.mcp_server
+```
+
+With the SDK installed the suite runs **72 passed, nothing skipped** — the extra
+test starts the real server over stdio and drives it with a real client, because
+a server that imports cleanly and cannot start is worse than one that fails
+loudly.
+</details>
+
+<details>
+<summary><b>Against the real API</b> — this one spends operations</summary>
+
+```bash
+export SUPERDOCS_API_KEY=your-key-here
+python3 backend/demo.py --live --sample 1   # one step, one operation
+```
+
+`--sample N` is the small-sample bound. Use it. Exports and `whoami` are free;
+edits are not.
+</details>
+
+### Environment
+
+| Variable | Required | What it is |
+|---|---|---|
+| `SUPERDOCS_API_KEY` | only for `--live` and the MCP server | Your SuperDocs API key. An agent can create its own account with `POST /v1/agents/signup`. |
+| `QUOTA_AWARE_AGENT_LEDGER` | no | Where the operation ledger is kept. Defaults to `~/.quota-aware-agent/operations.jsonl`. **Set it per account** — two agents driving different accounts must not share one. |
+
+### What to run to check each claim
+
+| Claim | Command |
+|---|---|
+| It sizes work to fit and names what it dropped | `python3 backend/demo.py --scenario tight` |
+| It refuses to start rather than half-finish | `python3 backend/demo.py --scenario broke` |
+| It can refuse a partial run outright | `python3 backend/demo.py --scenario tight --refuse` |
+| It bounds anything that loops | `python3 backend/demo.py --sample 2` |
+| It says what it spent, and whether that adds up | `python3 backend/demo.py --receipt` |
+| A rerun does not pay twice | `python3 backend/demo.py --scenario tight --ledger /tmp/ops.jsonl` — **twice** |
+
+The second run of that last one declines to repeat the first run's work and says
+so. That is graceful re-entry shown rather than asserted.
+
+## What it uses from SuperDocs
+
+| Surface | Used for |
+|---|---|
+| `GET /v1/agents/whoami` | The one authoritative allowance read available to an API key. Free. |
+| `POST /v1/documents/upload` | The document. Multipart; the filename extension decides the parser. |
+| `POST /v1/chat/async` | The edit instruction, with `approval_mode: ask_every_time`. **The only billable call.** |
+| `GET /v1/jobs/{id}` | Polling. Silence is treated as processing, never as a crash. |
+| `POST /v1/chat/{session_id}/approve` | Approving proposed changes, item by item. |
+| `POST /v1/documents/export` | The finished file. Free, so it runs even when the run stopped early. |
+| **MCP** | The delivery surface — four tools, of which one costs anything. |
+
 ## The problem, stated precisely
 
 An agent that plans without checking its allowance starts work it cannot
@@ -216,38 +301,16 @@ at an explicit deadline — and when it does, it says the deadline was *ours*:
 **Trap 3 · the allowance.** The whole point of this build. Small-sample mode
 and the stopping rule above.
 
-## Run it
+## Why the tests need no key
 
-No key, no network, nothing to install:
+The transport is injected. `tests/fake.py` implements the documented response
+shapes — including the double-parsed envelope, a `usage` block on billable
+responses, and the `400` the live upload endpoint returns for a filename whose
+extension disagrees with its bytes. The demo answers with the **same** fake the
+suite uses, so what a reviewer watches is what the tests assert; a second fake
+written only for the demo would be free to flatter the code that calls it.
 
-```
-python3 -m pytest                 # 71 passed, 1 skipped — offline, no key
-python3 backend/demo.py                   # allowance is plentiful — everything runs
-python3 backend/demo.py --scenario tight  # not enough — it degrades and explains
-python3 backend/demo.py --scenario broke  # nothing fits — it refuses to start
-python3 backend/demo.py --sample 2        # small-sample mode
-python3 backend/demo.py --receipt         # the line items, and whether they add up
-python3 backend/demo.py --scenario tight --refuse   # refuses a partial run outright
-```
-
-Graceful re-entry, shown rather than asserted — run it twice against the same
-ledger and watch the second run decline to pay for the first run's work:
-
-```
-python3 backend/demo.py --scenario tight --ledger /tmp/ops.jsonl   # does figures, dates
-python3 backend/demo.py --scenario tight --ledger /tmp/ops.jsonl   # does terms, footer
-```
-
-Against the real API:
-
-```
-export SUPERDOCS_API_KEY=your-key-here
-python3 backend/demo.py --live
-```
-
-The transport is injected, which is why the tests need no key: the fake
-implements the documented response shapes, including the double-parsed
-envelope and a `usage` block on every billable response.
+See **Setup and test** at the top for every command.
 
 ## Shared core — stated plainly
 
