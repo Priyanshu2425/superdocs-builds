@@ -136,7 +136,11 @@ def test_the_server_starts_and_advertises_its_tools():
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
-    root = str(pathlib.Path(__file__).resolve().parents[1])
+    # The package lives under backend/, so that is what has to be on the path.
+    # Pointing PYTHONPATH at the project root instead made this test pass only
+    # on a machine where the package was already pip-installed -- which is every
+    # machine except a stranger's fresh clone, the one case it exists to cover.
+    root = str(pathlib.Path(__file__).resolve().parents[1] / "backend")
 
     async def drive():
         params = StdioServerParameters(
@@ -159,5 +163,6 @@ def test_the_server_starts_and_advertises_its_tools():
                 return names, out.content[0].text
 
     names, text = asyncio.run(drive())
-    assert names == {"check_allowance", "plan_work", "run_work"}
+    assert names == {"check_allowance", "plan_work", "run_work",
+                     "resolve_operation"}
     assert "SUPERDOCS_API_KEY" in text     # the failure is legible to the agent

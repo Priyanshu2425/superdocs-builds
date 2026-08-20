@@ -12,7 +12,7 @@ import axe from "axe-core";
 import { describe, expect, it, beforeEach } from "vitest";
 
 import App from "../App";
-import { CAPTURES, dropConnectionAfter, serve } from "./server";
+import { CAPTURES, dropConnectionAfter, serve, serveCapabilities, serveStyling } from "./server";
 
 /** Vocabulary that belongs to the engine and never to a person's screen. */
 const JARGON = [
@@ -64,6 +64,168 @@ async function repairing(name: string) {
 beforeEach(() => {
   dropConnectionAfter(null);
   serve("truncated");
+  serveCapabilities(false, "");
+  serveStyling({
+    status: 200,
+    stages: ["Sending the recovered content to SuperDocs for styling…"],
+    final: {
+      ok: true,
+      rejected_for_content: false,
+      notes: ["SuperDocs returned a styled file."],
+      filename: "broken-repaired-styled.docx",
+      download: "/api/download/styled-token",
+      ops_charged: 1,
+      ops_confirmed: false,
+      allowance_known: true,
+      allowance_remaining: 42,
+      warnings: 0,
+    },
+  });
+});
+
+describe("the styled copy", () => {
+  /** Set up a finished repair on a page that can style. */
+  async function repaired() {
+    serveCapabilities(true, "Styling is available on this page.");
+    const user = await repairing("truncated");
+    await screen.findByText(/what came through/i);
+    return user;
+  }
+
+  it("offers nothing when this copy of the page cannot style", async () => {
+    serveCapabilities(false, "Styling is switched off on this copy of the page.");
+    await repairing("truncated");
+    await screen.findByText(/what came through/i);
+    expect(screen.queryByRole("button", { name: /send it for styling/i })).toBeNull();
+    // and it says so, rather than leaving a person wondering what they missed
+    expect(screen.getByText(/switched off on this copy/i)).toBeInTheDocument();
+  });
+
+  it("never offers a styled copy of a document it could not repair", async () => {
+    serveCapabilities(true, "Styling is available on this page.");
+    await repairing("missing-document-part");
+    await screen.findAllByText(/could not be repaired/i);
+    expect(screen.queryByRole("button", { name: /send it for styling/i })).toBeNull();
+  });
+
+  it("waits to be asked, and says the plain file is already theirs", async () => {
+    await repaired();
+    expect(screen.getByRole("button", { name: /send it for styling/i })).toBeInTheDocument();
+    expect(screen.getByText(/already yours/i)).toBeInTheDocument();
+    // nothing has been sent: the second download does not exist yet
+    expect(screen.queryByRole("link", { name: /download the styled file/i })).toBeNull();
+  });
+
+  it("hands back a second file without taking away the first", async () => {
+    const user = await repaired();
+    await user.click(screen.getByRole("button", { name: /send it for styling/i }));
+
+    const styled = await screen.findByRole("link", { name: /download the styled file/i });
+    expect(styled).toHaveAttribute("href", "/api/download/styled-token");
+    // the plain rebuild is still on the page, still downloadable
+    expect(screen.getByRole("link", { name: /download the repaired file/i })).toBeInTheDocument();
+    expect(screen.getByText(/untouched and still yours/i)).toBeInTheDocument();
+  });
+
+  it("says what it cost, and marks an unconfirmed number as an estimate", async () => {
+    const user = await repaired();
+    await user.click(screen.getByRole("button", { name: /send it for styling/i }));
+    await screen.findByRole("link", { name: /download the styled file/i });
+    expect(screen.getByText(/1 estimated operation/i)).toBeInTheDocument();
+  });
+
+  it("keeps the plain file when styling fails, and says so without blaming them", async () => {
+    serveStyling({
+      final: {
+        ok: false,
+        rejected_for_content: false,
+        notes: ["Styling did not work. The rebuilt file above is unchanged and still yours."],
+        filename: "broken-repaired-styled.docx",
+        download: null,
+        ops_charged: 0,
+        ops_confirmed: false,
+        allowance_known: false,
+        allowance_remaining: 0,
+        warnings: 0,
+      },
+    });
+    const user = await repaired();
+    await user.click(screen.getByRole("button", { name: /send it for styling/i }));
+
+    expect(await screen.findByText(/no styled copy/i)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /download the styled file/i })).toBeNull();
+    expect(screen.getByRole("link", { name: /download the repaired file/i })).toBeInTheDocument();
+  });
+
+  it("says plainly when a styled copy came back rewritten and was thrown away", async () => {
+    serveStyling({
+      final: {
+        ok: false,
+        rejected_for_content: true,
+        notes: [
+          "The styled version came back with the wording changed, so it was thrown away rather than handed over. Your document should say what you wrote. The rebuilt file is unchanged and still yours.",
+        ],
+        filename: "broken-repaired-styled.docx",
+        download: null,
+        ops_charged: 1,
+        ops_confirmed: false,
+        allowance_known: true,
+        allowance_remaining: 41,
+        warnings: 0,
+      },
+    });
+    const user = await repaired();
+    await user.click(screen.getByRole("button", { name: /send it for styling/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/thrown away/i);
+    expect((await screen.findAllByText(/wording changed/i)).length).toBe(2);
+    // and nothing is offered for download but the file they already had
+    expect(screen.queryByRole("link", { name: /download the styled file/i })).toBeNull();
+    expect(screen.getByRole("link", { name: /download the repaired file/i })).toBeInTheDocument();
+  });
+
+  it("reports an exhausted allowance as a refusal to spend, not as a failure of theirs",
+    async () => {
+      serveStyling({
+        final: {
+          ok: false,
+          rejected_for_content: false,
+          notes: [
+            "There is no styling allowance left this month, so nothing was sent and nothing was spent. The rebuilt file is unchanged and still yours.",
+          ],
+          filename: "broken-repaired-styled.docx",
+          download: null,
+          ops_charged: 0,
+          ops_confirmed: false,
+          allowance_known: true,
+          allowance_remaining: 0,
+          warnings: 0,
+        },
+      });
+      const user = await repaired();
+      await user.click(screen.getByRole("button", { name: /send it for styling/i }));
+      // Twice: once on the page, once in the live region a screen reader hears.
+      expect((await screen.findAllByText(/nothing was spent/i)).length).toBe(2);
+    });
+
+  it("surfaces a refusal from the server in the reader's words", async () => {
+    serveStyling({
+      status: 409,
+      detail: "Styling is switched off on this copy of the page. The rebuilt file above is unchanged and still yours.",
+    });
+    const user = await repaired();
+    await user.click(screen.getByRole("button", { name: /send it for styling/i }));
+    expect((await screen.findAllByText(/switched off on this copy/i)).length).toBe(2);
+  });
+
+  it("says a quiet wait is normal while it works", async () => {
+    serveStyling({ stages: ["Waiting for SuperDocs to finish — large documents can take minutes."] });
+    const user = await repaired();
+    await user.click(screen.getByRole("button", { name: /send it for styling/i }));
+    await waitFor(() =>
+      expect(screen.getByText(/take minutes|quiet wait is normal/i)).toBeInTheDocument(),
+    );
+  });
 });
 
 describe("arriving", () => {

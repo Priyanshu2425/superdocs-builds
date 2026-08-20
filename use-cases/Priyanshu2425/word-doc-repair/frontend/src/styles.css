@@ -311,6 +311,30 @@ h1 {
 
 .after { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 26px; }
 
+/* The styled copy. A second offer, set below the handover and quieter than it:
+   the plain file is the promise this page keeps, and this is the extra. Ruled
+   off rather than boxed, because a second panel in chevron tape would read as a
+   second custody and there is only one. */
+.styling {
+  margin: 30px 0 0;
+  border-top: 1px solid var(--rule);
+  padding-top: 20px;
+}
+.styling__lead {
+  font-size: var(--t3);
+  color: var(--ink-2);
+  margin: 10px 0 16px;
+  max-width: 60ch;
+}
+.styling .handoff { margin-top: 20px; }
+.styling__off {
+  margin: 30px 0 0;
+  border-top: 1px solid var(--rule);
+  padding-top: 16px;
+  font-size: var(--t2);
+  color: var(--ink-3);
+}
+
 .cli {
   margin: 34px 0 0;
   font-size: var(--t2);

@@ -56,23 +56,46 @@ class Plan:
     publish: list[Change] = field(default_factory=list)
     defer: list[Change] = field(default_factory=list)
     rationale: str = ""
+    #: How the published work will be sent -- one request, or one each. Carried
+    #: on the plan so a price quoted at planning time and the price charged at
+    #: run time cannot come from two different models of the same work.
+    batched: bool = True
 
     @property
     def ops_to_publish(self) -> int:
-        return estimate(self.publish)
+        return estimate(self.publish, batched=self.batched)
 
     @property
     def complete(self) -> bool:
         return not self.defer
 
 
-def estimate(changes: list[Change]) -> int:
+def estimate(changes: list[Change], *, batched: bool = True) -> int:
     """Operations a set of changes will bill.
 
     Zero changes cost nothing. Anything else costs at least one operation,
     then one more per 25 sections -- which is the documented accounting, not
     a division.
+
+    `batched` is the question the docs force and that a section count alone
+    cannot answer: **do these changes ride in one request, or in several?**
+    The docs price a *request* -- "most requests bill one operation; very large
+    ones bill one per 25 sections edited" -- so the floor of one applies per
+    request, not per plan.
+
+      * ``batched=True``  -- all of it goes in a single `POST /v1/chat/async`.
+        That is the publisher's shape, where a document write is one call.
+      * ``batched=False`` -- each change is its own call. That is the agent's
+        shape: one edit instruction per step, one request each.
+
+    Getting this wrong is not a rounding error. Four steps of five sections
+    pooled to twenty sections price as ONE operation, and then bill as FOUR --
+    so the agent reports "it fits", starts, and runs out partway through
+    somebody's document. That is the exact failure this build exists to
+    prevent, arriving through its own arithmetic.
     """
+    if not batched:
+        return sum(estimate([c]) for c in changes)
     sections = sum(c.sections for c in changes)
     if sections <= 0:
         return 0
@@ -118,6 +141,15 @@ class BudgetGuard:
             )
         return self._balance
 
+    def mark_exhausted(self) -> None:
+        """The platform said so on a call that was allowed to complete anyway.
+
+        Free calls are not refused when the allowance is gone, but the signal
+        they carry is still the authoritative one and must reach the planner --
+        otherwise the agent reads "exhausted" and plans as though it had not.
+        """
+        self._exhausted = True
+
     def remaining(self) -> Balance:
         return self._balance
 
@@ -125,11 +157,18 @@ class BudgetGuard:
     def exhausted(self) -> bool:
         return self._exhausted
 
-    def fit(self, changes: list[Change], remaining: int | None = None) -> Plan:
+    def fit(self, changes: list[Change], remaining: int | None = None,
+            *, batched: bool = True) -> Plan:
         """Pure given a budget number. Publishes what fits, highest severity
-        first, defers the rest, and says so in a sentence a person can read."""
+        first, defers the rest, and says so in a sentence a person can read.
+
+        `batched` says whether the published set is one request or one each;
+        see `estimate`. It is threaded through rather than defaulted quietly,
+        because a plan priced under the wrong model is a plan that fits on
+        paper and overruns in practice.
+        """
         budget = self._balance.ops if remaining is None else remaining
-        needed = estimate(changes)
+        needed = estimate(changes, batched=batched)
 
         if self._exhausted or budget <= 0:
             # These are different situations and must not be reported as one.
@@ -147,17 +186,18 @@ class BudgetGuard:
                     f"Started nothing: {reason}. "
                     f"{len(changes)} change(s) are queued and named in the run report."
                 ),
+                batched=batched,
             )
 
         if needed <= budget:
-            return Plan(publish=list(changes), defer=[], rationale="")
+            return Plan(publish=list(changes), defer=[], rationale="", batched=batched)
 
         ordered = sorted(
             changes, key=lambda c: (_SEVERITY_ORDER.get(c.severity, 99), -c.sections)
         )
         publish: list[Change] = []
         for change in ordered:
-            if estimate(publish + [change]) <= budget:
+            if estimate(publish + [change], batched=batched) <= budget:
                 publish.append(change)
         deferred = [c for c in changes if c not in publish]
 
@@ -165,8 +205,9 @@ class BudgetGuard:
         all_sections = sum(c.sections for c in changes)
         rationale = (
             f"Sized to fit: {pub_sections} of {all_sections} changed sections "
-            f"({estimate(publish)} of {needed} operations). Deferred "
+            f"({estimate(publish, batched=batched)} of {needed} operations). Deferred "
             f"{len(deferred)} lower-severity change(s) to stay inside the "
             "remaining allowance."
         )
-        return Plan(publish=publish, defer=deferred, rationale=rationale)
+        return Plan(publish=publish, defer=deferred, rationale=rationale,
+                    batched=batched)

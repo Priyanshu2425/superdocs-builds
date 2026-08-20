@@ -69,7 +69,7 @@ def test_refusing_a_partial_run_is_a_choice_a_caller_can_make(fake_tight):
     updated is worse than one not updated at all."""
     a = agent(fake_tight, policy=Policy(reserve=0,
                                         when_it_does_not_fit=WhenItDoesNotFit.REFUSE))
-    report = a.run("sess", "d.docx", DOC, steps(4, sections=30))
+    report = a.run("sess", "d.html", DOC, steps(4, sections=30))
     assert report.completed == []
     assert report.stop_reason is StopReason.REFUSED_PARTIAL
     assert "refuse" in report.stopped_because.lower()
@@ -77,7 +77,7 @@ def test_refusing_a_partial_run_is_a_choice_a_caller_can_make(fake_tight):
 
 def test_degrading_is_still_the_default(fake_tight):
     report = agent(fake_tight, policy=Policy(reserve=0)).run(
-        "sess", "d.docx", DOC, steps(4, sections=30))
+        "sess", "d.html", DOC, steps(4, sections=30))
     assert report.completed and report.deferred
 
 
@@ -137,7 +137,7 @@ def test_the_rendered_receipt_marks_every_number_it_did_not_get_from_the_platfor
 
 
 def test_a_receipt_survives_being_serialised(fake):
-    report = agent(fake).run("sess", "d.docx", DOC, steps(1))
+    report = agent(fake).run("sess", "d.html", DOC, steps(1))
     body = json.loads(report.receipt.as_json(report.balance_at_start,
                                              report.balance_at_end))
     assert body["lines"] and body["reconciliation"]["explanation"]
@@ -159,12 +159,12 @@ def test_an_applied_step_is_not_repeated_and_not_billed_again(fake, tmp_path):
     path = tmp_path / "ops.jsonl"
     work = steps(2)
 
-    first = agent(fake, ledger=OperationLedger(path)).run("sess", "d.docx", DOC, work)
+    first = agent(fake, ledger=OperationLedger(path)).run("sess", "d.html", DOC, work)
     assert len(first.completed) == 2
     spent_first = first.receipt.counted
 
     fake.remaining = 500
-    second = agent(fake, ledger=OperationLedger(path)).run("sess", "d.docx", DOC, work)
+    second = agent(fake, ledger=OperationLedger(path)).run("sess", "d.html", DOC, work)
     assert second.completed == []
     assert second.already_applied == ["s0", "s1"]
     assert second.receipt.counted == 0, "the rerun was charged for work already done"
@@ -183,7 +183,7 @@ def test_a_call_that_was_started_and_never_confirmed_is_neither_repeated_nor_for
     key = operation_key("sess", "s0", work[0].instruction, work[0].sections)
     OperationLedger(path).begin(key, session_id="sess", step_id="s0")
 
-    report = agent(fake, ledger=OperationLedger(path)).run("sess", "d.docx", DOC, work)
+    report = agent(fake, ledger=OperationLedger(path)).run("sess", "d.html", DOC, work)
     assert report.needs_a_person == ["s0"]
     assert report.completed == []
     assert report.receipt.counted == 0
@@ -201,7 +201,7 @@ def test_a_person_can_resolve_what_the_agent_would_not_decide(fake, tmp_path):
 
     ledger.resolve(key, applied=False, note="the document did not have the edit")
     assert ledger.unresolved() == []
-    report = agent(fake, ledger=OperationLedger(path)).run("sess", "d.docx", DOC, work)
+    report = agent(fake, ledger=OperationLedger(path)).run("sess", "d.html", DOC, work)
     assert report.completed == ["s0"], "a failed call must be repeatable"
 
 
@@ -219,7 +219,7 @@ def test_the_ledger_is_written_before_the_call_not_after(fake, tmp_path):
 
     with pytest.raises(KeyboardInterrupt):
         agent(DiesMidCall(), ledger=OperationLedger(path)).run(
-            "sess", "d.docx", DOC, work)
+            "sess", "d.html", DOC, work)
 
     # A fresh ledger, as a new process would build it.
     assert len(OperationLedger(path).records()) == 1
@@ -268,7 +268,7 @@ def test_the_agent_hands_its_remaining_allowance_back_on_every_result(fake):
 
 def test_the_hint_never_presents_an_inferred_number_as_a_confirmed_one(fake):
     a = agent(fake)
-    a.run("sess", "d.docx", DOC, steps(1))
+    a.run("sess", "d.html", DOC, steps(1))
     hint = a.budget_hint()
     assert hint["authoritative"] in (True, False)
     if not hint["authoritative"]:

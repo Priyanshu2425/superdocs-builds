@@ -62,6 +62,7 @@
     "structure_preserved": false,
     "filename": "03-unclosed-tags-repaired.docx",
     "preview_html": "<p>Quarterly Report</p>\n<p>Revenue rose in Q3 — driven by renewals &amp; upsell.</p>\n<p>Regional breakdown</p>\n<p>&lt;w:tblPr&gt;&lt;w:tblStyle w:val=\"TableGrid\"/&gt;&lt;w:tblW w:w=\"0\" w:type=\"auto\"/&gt;&lt;w:tblBorders&gt;&lt;w:top w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/&gt;&lt;w:left w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/&gt;&lt;w:bottom w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/&gt;&lt;w:right w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/&gt;&lt;w:insideH w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/&gt;&lt;w:insideV w:val=\"single\" w:sz=\"4\" w:color=\"BFBFBF\"/&gt;&lt;/w:tblBorders&gt;&lt;/w:tblPr&gt;&lt;w:tr&gt;&lt;w:tc&gt;&lt;w:tcPr&gt;&lt;w:tcW w:w=\"0\" w:type=\"auto\"/&gt;&lt;/w:tcPr&gt;&lt;w:p&gt;&lt;w:r&gt;&lt;w:t xml:space=\"preserve\"&gt;Region</p>\n<p>&lt;w:tcPr&gt;&lt;w:tcW w:w=\"0\" w:type=\"auto\"/&gt;&lt;/w:tcPr&gt;&lt;w:p&gt;&lt;w:r&gt;&lt;w:t xml:space=\"preserve\"&gt;Revenue</p>\n<p>&lt;w:tc&gt;&lt;w:tcPr&gt;&lt;w:tcW w:w=\"0\" w:type=\"auto\"/&gt;&lt;/w:tcPr&gt;&lt;w:p&gt;&lt;w:r&gt;&lt;w:t xml:space=\"preserve\"&gt;EMEA</p>",
-    "download": "/api/download/unclosed-tags-token"
+    "download": "/api/download/unclosed-tags-token",
+    "style": "/api/style/unclosed-tags-token"
   }
 }

@@ -21,8 +21,16 @@
    FORM: Postal damaged-item recovery notice. Seventh on my grounded list, which
    is the one the seed assigned (key e3d60a22, direction scope, persuade).
    ========================================================================== */
-import { useCallback, useRef, useState } from "react";
-import { checkFile, repairFile, RepairError, type Report as ReportT, type Stage } from "./lib/repair";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  capabilities,
+  checkFile,
+  repairFile,
+  RepairError,
+  type Capabilities,
+  type Report as ReportT,
+  type Stage,
+} from "./lib/repair";
 import { Report } from "./components/Report";
 
 type Phase = "idle" | "working" | "done";
@@ -47,7 +55,20 @@ export default function App() {
   const [problem, setProblem] = useState<string | null>(null);
   const [handed, setHanded] = useState<{ name: string; size: number } | null>(null);
   const [over, setOver] = useState(false);
+  // Asked once, before anything is offered. A page that advertises a step it
+  // cannot take is the button that fails when somebody presses it.
+  const [can, setCan] = useState<Capabilities>({ styling: false, note: "" });
   const input = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let live = true;
+    void capabilities().then((c) => {
+      if (live) setCan(c);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   const start = useCallback(async (file: File) => {
     const refusal = checkFile(file);
@@ -219,7 +240,11 @@ export default function App() {
 
                 {phase === "done" && report ? (
                   <>
-                    <Report report={report} onAnother={another} />
+                    <Report
+                      report={report}
+                      onAnother={another}
+                      styling={{ available: can.styling, note: can.note }}
+                    />
                     {/* The verdict is what someone came for; the steps are what
                         they read only if they want to check the working. */}
                     <details className="steps">

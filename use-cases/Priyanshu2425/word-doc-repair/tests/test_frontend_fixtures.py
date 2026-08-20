@@ -43,7 +43,7 @@ def _capture(name: str, filename: str, make) -> dict:
     r = repair(make(), filename, on_progress=lambda stage, message: events.append(
         {"stage": stage, "message": message}
     ))
-    report = r.as_payload(f"/api/download/{name}-token")
+    report = r.as_payload(f"/api/download/{name}-token", f"/api/style/{name}-token")
     return {"name": name, "filename": filename, "events": events, "report": report}
 
 

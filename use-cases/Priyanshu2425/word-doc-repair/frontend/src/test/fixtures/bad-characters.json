@@ -61,6 +61,7 @@
     "structure_preserved": true,
     "filename": "04-bad-characters-repaired.docx",
     "preview_html": "<h1>Quarterly Report</h1>\n<p>Revenue rose in Q3 — driven by renewals &amp; upsell.</p>\n<h2>Regional breakdown</h2>\n<table><tr><td>Region</td><td>Revenue</td></tr><tr><td>EMEA</td><td>1.2M</td></tr><tr><td>APAC</td><td>0.8M</td></tr></table>\n<p>Prepared by the finance team.</p>",
-    "download": "/api/download/bad-characters-token"
+    "download": "/api/download/bad-characters-token",
+    "style": "/api/style/bad-characters-token"
   }
 }

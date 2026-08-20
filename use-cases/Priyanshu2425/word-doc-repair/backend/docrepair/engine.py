@@ -55,7 +55,8 @@ class Repair:
     #: the stage that is allowed to say it are not the same one.
     container_was_damaged: bool = False
 
-    def as_payload(self, download: str | None = None) -> dict:
+    def as_payload(self, download: str | None = None,
+                   style: str | None = None) -> dict:
         """The one shape this result takes on the wire.
 
         Here rather than in `web.py` because two callers need it — the endpoint
@@ -75,6 +76,10 @@ class Repair:
             "filename": self.filename,
             "preview_html": self.preview_html,
             "download": download if self.ok else None,
+            # Where the optional styling pass can be started for this result.
+            # Null on a failure for the same reason `download` is: there is
+            # nothing to style, and offering the button would be a claim.
+            "style": style if self.ok else None,
         }
 
     def summary(self) -> str:

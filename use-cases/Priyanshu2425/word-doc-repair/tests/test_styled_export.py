@@ -13,10 +13,17 @@ from tests import broken
 
 class FakeSuperDocs:
     def __init__(self, fail_at=None, quota_exhausted=False, no_job=False, no_file=False,
-                 never_settles=False):
+                 never_settles=False, quota_remaining=None):
         self.fail_at, self.no_job, self.no_file = fail_at, no_job, no_file
         self.quota_exhausted = quota_exhausted
         self.never_settles = never_settles
+        # None means the balance cannot be read -- which is the ordinary case
+        # for a personal key, and is not the same as a balance of zero.
+        self.quota_remaining = quota_remaining
+        # What the export hands back. A real .docx by default, built from the
+        # HTML this fake was given, so the content guard has something honest
+        # to check. Tests that want a rewrite pass their own.
+        self.exported = None
         self.calls, self.approved, self.uploaded_html = [], [], None
         self._approved = False
 
@@ -28,8 +35,16 @@ class FakeSuperDocs:
         usage = {"ops_charged": 1, "monthly_remaining": 10,
                  "quota_exhausted": self.quota_exhausted}
 
+        if path == "/v1/agents/whoami":
+            if self.quota_remaining is None:
+                return Response(401, {"detail": "not an agent key"})
+            return Response(200, {"quota": {"tier": "free", "monthly_limit": 500,
+                                            "used": 500 - self.quota_remaining,
+                                            "remaining": self.quota_remaining}})
         if path == "/v1/documents/upload":
             self.uploaded_html = kw["files"]["file"][1]
+            if self.exported is None:
+                self.exported = docx_of(self.uploaded_html)
             return Response(200, {"ok": True})
         if path == "/v1/chat/async":
             if self.no_job:
@@ -52,8 +67,24 @@ class FakeSuperDocs:
             self._approved = True
             return Response(200, {"status": "ok", "usage": usage})
         if path == "/v1/documents/export":
-            return Response(200, {"raw": b"" if self.no_file else b"STYLED-DOCX"}, {})
+            if self.no_file:
+                return Response(200, {"raw": b""}, {})
+            return Response(200, {"raw": self.exported}, {})
         return Response(404, {})
+
+
+def docx_of(html) -> bytes:
+    """A .docx saying exactly what the HTML says -- a styling pass that changed
+    nothing but the styling. The honest answer, which the guard must accept."""
+    import re
+
+    from docrepair.docx import Block, write_docx
+
+    text = html.decode("utf-8") if isinstance(html, bytes) else html
+    words = re.sub(r"<[^>]+>", " ", text)
+    import html as _html
+
+    return write_docx([Block("paragraph", _html.unescape(words))])
 
 
 def blocks_of(data=None):
@@ -72,9 +103,12 @@ def run(fake, blocks=None):
 def test_the_four_calls_happen_in_the_required_order():
     fake = FakeSuperDocs()
     r = run(fake)
-    assert r.ok and r.output == b"STYLED-DOCX"
+    assert r.ok and r.output
     order = [c for c in fake.calls if not c.startswith("/v1/jobs/")]
-    assert order == ["/v1/documents/upload", "/v1/chat/async",
+    # The balance read comes first and is not part of the contract -- it is
+    # trap 3, asked before the work rather than discovered inside it.
+    assert order == ["/v1/agents/whoami",
+                     "/v1/documents/upload", "/v1/chat/async",
                      "/v1/chat/sess/approve", "/v1/documents/export"]
     # and it waited for the job to settle before exporting
     approve_at = fake.calls.index("/v1/chat/sess/approve")
@@ -177,3 +211,106 @@ def test_it_never_reports_zero_operations_for_a_billable_call():
     r = run(FakeSuperDocs())
     assert r.ok
     assert r.ops_charged >= 1
+
+
+def test_it_does_not_spend_an_allowance_it_has_already_been_told_is_gone():
+    """Trap 3. A styling pass that cannot finish should never be started.
+
+    The failure this prevents is not a wasted call -- it is a person watching a
+    progress line for work that was refused at the far end, which is exactly the
+    shape of "it ran for a bit and then wanted money" the README quotes.
+    """
+    fake = FakeSuperDocs(quota_remaining=0)
+    r = run(fake)
+    assert not r.ok
+    assert fake.calls == ["/v1/agents/whoami"], "it sent something anyway"
+    assert r.ops_charged == 0
+    assert r.allowance_known and r.allowance_remaining == 0
+    assert any("nothing was spent" in n for n in r.notes)
+    assert any("still yours" in n for n in r.notes)
+
+
+def test_a_balance_it_cannot_read_is_not_treated_as_a_balance_of_zero():
+    """A personal key is not an agent key, and `whoami` answers only the latter.
+
+    Refusing on a number nobody managed to read would be its own bluff, so the
+    work proceeds and the report says the balance was unknown.
+    """
+    fake = FakeSuperDocs()          # whoami answers 401
+    r = run(fake)
+    assert r.ok, "an unreadable balance stopped work it had no business stopping"
+    assert not r.allowance_known
+
+
+def test_a_balance_that_is_there_is_read_and_reported():
+    fake = FakeSuperDocs(quota_remaining=7)
+    r = run(fake)
+    assert r.ok
+    assert r.allowance_known and r.allowance_remaining == 7
+
+
+def test_a_balance_read_that_blows_up_never_costs_the_caller_the_styling():
+    """The preflight is a courtesy, not a gate. If it cannot answer, it gets out
+    of the way."""
+    class Exploding(FakeSuperDocs):
+        def request(self, method, path, **kw):
+            if path == "/v1/agents/whoami":
+                raise ConnectionError("no network for this one call")
+            return super().request(method, path, **kw)
+
+    r = run(Exploding())
+    assert r.ok and not r.allowance_known
+
+
+def test_a_styled_file_that_says_something_else_is_thrown_away():
+    """The defect this guard exists for, seen live on 2026-08-20: a four-line
+    recovered report came back with three invented paragraphs, a subtotal row,
+    a disclaimer and a signature block. It opens cleanly and it reads better
+    than the plain rebuild, and it is partly fiction. Handing that to somebody
+    who came here to get their own words back is the worst thing this product
+    could do -- worse than returning nothing, because they would not notice.
+    """
+    fake = FakeSuperDocs()
+    fake.exported = _rewritten()
+    r = run(fake)
+    assert not r.ok, "a rewritten document was handed over as a repair"
+    assert r.rejected_for_content
+    assert r.output == b""
+    assert any("wording changed" in n for n in r.notes)
+    assert any("still yours" in n for n in r.notes)
+
+
+def _rewritten() -> bytes:
+    from docrepair.docx import Block, write_docx
+
+    return write_docx([
+        Block("heading", "Quarterly Report", level=1),
+        Block("paragraph", "Revenue rose in Q3."),
+        Block("paragraph", "This growth reflects a sustained commitment to "
+                           "client retention and successful expansion."),
+    ])
+
+
+def test_a_styled_file_that_says_the_same_thing_is_accepted():
+    """The guard has to let the good case through, or it is just an off switch."""
+    r = run(FakeSuperDocs())
+    assert r.ok and not r.rejected_for_content
+
+
+def test_the_drift_check_reads_re_wrapping_and_re_escaping_as_no_change():
+    from docrepair.docx import Block, write_docx
+    from docrepair.styled_export import content_drift
+
+    html = "<h1>Q3 &amp; Q4</h1><p>Revenue rose\n  \u2014 driven by renewals.</p>"
+    same = write_docx([Block("heading", "Q3 & Q4", level=1),
+                       Block("paragraph", "Revenue rose \u2014 driven by renewals.")])
+    assert content_drift(html, same) == (0, 0)
+
+
+def test_a_styled_file_that_drops_content_is_thrown_away_too():
+    from docrepair.docx import Block, write_docx
+
+    fake = FakeSuperDocs()
+    fake.exported = write_docx([Block("paragraph", "Quarterly Report")])
+    r = run(fake)
+    assert not r.ok and r.rejected_for_content

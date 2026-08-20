@@ -24,6 +24,30 @@ export interface Report {
    *  there is nothing to preview and a preview of nothing is a claim. */
   preview_html: string;
   download: string | null;
+  /** Where the optional styling pass can be started. Null on a failure. */
+  style: string | null;
+}
+
+/** What this copy of the page can do. Asked before anything is offered, so the
+ *  styling step is either genuinely available or plainly explained. */
+export interface Capabilities {
+  styling: boolean;
+  note: string;
+}
+
+export interface Styled {
+  ok: boolean;
+  notes: string[];
+  /** A styled file came back and was thrown away because its wording had
+   *  changed. Not a failure of the service so much as a refusal by this page. */
+  rejected_for_content: boolean;
+  filename: string;
+  download: string | null;
+  ops_charged: number;
+  ops_confirmed: boolean;
+  allowance_known: boolean;
+  allowance_remaining: number;
+  warnings: number;
 }
 
 export const MAX_BYTES = 20 * 1024 * 1024;
@@ -39,9 +63,94 @@ export function checkFile(file: File): string | null {
     return "That file is larger than 20 MB, which is more than this page can take.";
   }
   if (!/\.docx$/i.test(file.name)) {
-    return "This page can only work on Word .docx files. If your file is a .doc, open it in Word once and save it as .docx first.";
+    // The advice that used to stand here was "open it in Word and save it as
+    // .docx" -- addressed to somebody whose Word will not open the file, which
+    // is why they are here. It is still the right first move when the file is
+    // merely old, so it stays; what was missing is the other half.
+    return "This page can only work on Word .docx files. If yours is a .doc, open it in Word once and save it as .docx — and if Word will not open it either, this page cannot recover that older format.";
   }
   return null;
+}
+
+export async function capabilities(): Promise<Capabilities> {
+  try {
+    const res = await fetch("/api/capabilities");
+    if (!res.ok) throw new Error("unavailable");
+    return (await res.json()) as Capabilities;
+  } catch {
+    // A page that cannot ask does not offer. Silence here is not "yes".
+    return { styling: false, note: "" };
+  }
+}
+
+/**
+ * The second pass, and only when somebody asks for it.
+ *
+ * Answers in the same newline-delimited stream as the repair, because it is the
+ * same situation: something slow is happening to a person's document and they
+ * are entitled to watch it. A long silence here is still processing, which is
+ * what the waiting line on the page says.
+ */
+export async function styleDocument(
+  url: string,
+  onStage: (stage: Stage) => void,
+  signal?: AbortSignal,
+): Promise<Styled> {
+  let res: Response;
+  try {
+    res = await fetch(url, { method: "POST", signal });
+  } catch {
+    throw new RepairError(
+      "The connection dropped. The rebuilt file above is unchanged and still yours.",
+    );
+  }
+  if (!res.ok || !res.body) {
+    let detail = "";
+    try {
+      const body = await res.json();
+      if (typeof body?.detail === "string") detail = body.detail;
+    } catch {
+      /* nothing more to learn */
+    }
+    throw new RepairError(
+      detail || "Styling could not be started. The rebuilt file above is unchanged and still yours.",
+    );
+  }
+  const final = await readStream(res, onStage);
+  if (!final) {
+    throw new RepairError(
+      "The connection dropped part-way through. The rebuilt file above is unchanged and still yours.",
+    );
+  }
+  return final as unknown as Styled;
+}
+
+/** One reader for both streams: stage lines, then a final line marked done. */
+async function readStream(
+  res: Response,
+  onStage: (stage: Stage) => void,
+): Promise<Record<string, unknown> | null> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let final: Record<string, unknown> | null = null;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let cut: number;
+    while ((cut = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, cut).trim();
+      buffer = buffer.slice(cut + 1);
+      if (!line) continue;
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      if (parsed.done) final = parsed;
+      else onStage(parsed as unknown as Stage);
+    }
+  }
+  return final;
 }
 
 export async function repairFile(
@@ -74,26 +183,7 @@ export async function repairFile(
     );
   }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let report: Report | null = null;
-
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    let cut: number;
-    while ((cut = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, cut).trim();
-      buffer = buffer.slice(cut + 1);
-      if (!line) continue;
-      const parsed = JSON.parse(line) as Record<string, unknown>;
-      if (parsed.done) report = parsed as unknown as Report;
-      else onStage(parsed as unknown as Stage);
-    }
-  }
+  const report = (await readStream(res, onStage)) as unknown as Report | null;
 
   if (!report) {
     throw new RepairError(

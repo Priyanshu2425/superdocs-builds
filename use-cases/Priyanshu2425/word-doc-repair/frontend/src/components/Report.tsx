@@ -1,5 +1,6 @@
 import type { Report as ReportT } from "../lib/repair";
 import { Preview } from "./Preview";
+import { Styling } from "./Styling";
 
 /**
  * What happened, in the order a frightened person needs it: the verdict first,
@@ -12,9 +13,12 @@ import { Preview } from "./Preview";
 export function Report({
   report,
   onAnother,
+  styling,
 }: {
   report: ReportT;
   onAnother: () => void;
+  /** Whether this copy of the page can style, and what to say if it cannot. */
+  styling: { available: boolean; note: string };
 }) {
   const partial = report.ok && report.lost.length > 0;
   const stamp = !report.ok ? "Could not be repaired" : partial ? "Recovered in part" : "Recovered";
@@ -79,6 +83,10 @@ export function Report({
             </p>
           </div>
         </div>
+      ) : null}
+
+      {report.ok && report.style ? (
+        <Styling url={report.style} available={styling.available} note={styling.note} />
       ) : null}
 
       <div className="after">

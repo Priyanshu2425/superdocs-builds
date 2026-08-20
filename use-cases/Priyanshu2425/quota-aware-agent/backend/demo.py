@@ -9,6 +9,9 @@ can see the behaviour without spending an operation.
 
     --sample N    small-sample mode: run at most N steps
     --receipt     print the line items and whether they add up
+    --refuse      refuse a partial run rather than deliver a subset
+    --ledger F    keep the operation ledger in F, so running twice shows what
+                  a rerun after a crash does NOT pay for a second time
 """
 
 from __future__ import annotations
@@ -25,9 +28,10 @@ from pathlib import Path
 # code that calls it.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from quota_aware_agent.policy import Policy
+from quota_aware_agent.policy import Policy, WhenItDoesNotFit
 from quota_aware_agent import QuotaAwareAgent, Step, SuperDocsClient
 from quota_aware_agent.client import HttpTransport
+from quota_aware_agent.idempotency import OperationLedger
 
 WORK = [
     Step("figures", "Correct the revenue figures in the summary table.", 25, "critical"),
@@ -45,9 +49,16 @@ def main(argv=None) -> int:
     p.add_argument("--scenario", choices=sorted(SCENARIOS), default="roomy")
     p.add_argument("--live", action="store_true", help="use the real API")
     p.add_argument("--sample", type=int, default=None, help="run at most N steps")
-    p.add_argument("--file", default="contract.docx")
+    # HTML content, so an HTML name. SuperDocs picks its parser from the
+    # extension, so "contract.docx" holding HTML is a 400 on a live run.
+    p.add_argument("--file", default="contract.html")
     p.add_argument("--receipt", action="store_true",
                    help="print the line items and whether they add up")
+    p.add_argument("--refuse", action="store_true",
+                   help="refuse a partial run rather than deliver a subset")
+    p.add_argument("--ledger", default=None,
+                   help="keep the operation ledger in this file, so a second "
+                        "run sees what the first one paid for")
     a = p.parse_args(argv)
 
     if a.live:
@@ -67,7 +78,13 @@ def main(argv=None) -> int:
               f"{SCENARIOS[a.scenario]} operation(s) of allowance. Nothing is billed.\n")
 
     client = SuperDocsClient(transport, **({"sleep": sleep} if sleep else {}))
-    agent = QuotaAwareAgent(client, policy=Policy(reserve=1, max_steps=a.sample))
+    policy = Policy(
+        reserve=1, max_steps=a.sample,
+        when_it_does_not_fit=(WhenItDoesNotFit.REFUSE if a.refuse
+                              else WhenItDoesNotFit.DEGRADE),
+    )
+    agent = QuotaAwareAgent(client, policy=policy,
+                            ledger=OperationLedger(a.ledger) if a.ledger else None)
 
     content = b"<h1>Quarterly report</h1><p>...</p>"
     report = agent.run("demo-session", a.file, content, WORK)

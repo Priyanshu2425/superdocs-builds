@@ -49,6 +49,11 @@ is a form field, not a costume.
   behind a disclosure once the verdict is known. The answer outranks the working.
 - **The record line** — file, size, docket. A receipt, so the page has a name for
   the thing it is holding.
+- **The second offer** — the styled copy, ruled off below the handover rather
+  than boxed in its own tape. Tape means *in our custody*, and there is only one
+  custody; a second taped panel would read as a second document. It is always
+  below the download and never above it, because the plain file is the promise
+  and this is the extra.
 - **The sheet** — the rebuilt document itself, rendered for reading, between the
   losses and the handover. It carries no chevron tape: tape means *in our
   custody* and edges only the notice and the panel holding the file, and this is
@@ -61,6 +66,11 @@ is a form field, not a costume.
 - Losses are set at the same weight as recoveries. Styling losses as a footnote
   would be the overclaim this build refuses, expressed in CSS.
 - Retention is stated where the file is handed over, before it can expire.
+- A step this copy of the page cannot take is never rendered as a button. It is
+  either genuinely available or it is one quiet sentence saying it is off and
+  that nothing else is affected.
+- The styled copy is never automatic and never replaces the plain one. Both
+  downloads stay on the page together.
 - The verdict is a claim and the sheet is the thing itself. Where both are on
   screen the sheet is never smaller than the claim about it.
 - No engine vocabulary reaches the page — not in a stage line, not in a list, not

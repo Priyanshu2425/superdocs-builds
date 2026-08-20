@@ -127,10 +127,33 @@ class OperationLedger:
                                 ops_charged=ops_charged, job_id=job_id))
 
     def failed(self, key: str, note: str = "") -> Record:
+        """The call was never accepted, so it was never charged.
+
+        Only for failures that *prove* the request never reached the platform.
+        A failure that merely means we never heard the answer is a different
+        thing and must stay `IN_FLIGHT` -- see `never_learned`.
+        """
         prior = self.get(key)
         return self._put(Record(key=key, state=State.FAILED,
                                 session_id=prior.session_id,
                                 step_id=prior.step_id, note=note))
+
+    def never_learned(self, key: str, note: str = "") -> Record:
+        """The call may have been accepted, and we never found out.
+
+        A read timeout, a dropped connection mid-response, a 5xx from a gateway
+        that had already passed the request on: in every one of those the edit
+        may be applied and the operation may be charged. Marking them `FAILED`
+        makes them repeatable, and repeating them is the double-billing this
+        module exists to prevent -- so they stay `IN_FLIGHT` and are reported
+        to a person, exactly like a run that died mid-call.
+        """
+        prior = self.get(key)
+        return self._put(Record(
+            key=key, state=State.IN_FLIGHT, session_id=prior.session_id,
+            step_id=prior.step_id, job_id=prior.job_id,
+            note=note or "the call was sent and its outcome was never learned",
+        ))
 
     def resolve(self, key: str, *, applied: bool, note: str = "") -> Record:
         """A person looked at the document and told us what happened."""

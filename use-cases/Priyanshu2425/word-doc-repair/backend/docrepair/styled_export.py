@@ -22,20 +22,114 @@ from .docx import Block, blocks_to_html
 from .superdocs_client import QuotaExhausted, SuperDocsClient
 
 INSTRUCTION = (
-    "This document was recovered from a damaged file. Apply consistent heading "
-    "styles, table formatting and paragraph spacing. Do not add, remove or "
-    "reword any content -- only restore its formatting."
+    "Formatting only. This document was recovered from a damaged file and its "
+    "text is the only record of what its owner wrote. Apply consistent heading "
+    "styles, table formatting and paragraph spacing. Do NOT add, remove, "
+    "expand, summarise, complete or reword any text. Do not add sections, "
+    "headings, rows, totals, placeholders, disclaimers, signature blocks, "
+    "headers, footers or dates. Do not fill gaps. If a passage looks "
+    "incomplete, leave it exactly as it is. The word-for-word text of the "
+    "output must be identical to the input."
 )
+
+#: How many words of difference count as "it only restyled it". Zero: a
+#: formatting pass has no reason to change a single word, and the one thing
+#: this product cannot do is hand somebody a recovered document containing
+#: sentences they never wrote.
+ALLOWED_WORD_DRIFT = 0
+
+
+def _words(text: str) -> list[str]:
+    """Text reduced to what a reader would call the words, so that a formatting
+    pass -- which may re-wrap, re-space or re-escape -- reads as no change."""
+    import html as _html
+    import re
+
+    plain = _html.unescape(re.sub(r"<[^>]+>", " ", text))
+    return re.findall(r"[a-z0-9]+", plain.lower())
+
+
+def docx_text(blob: bytes) -> str:
+    """The text of a .docx, run by run. Deliberately not a full parse: this is
+    asked only "what does it say"."""
+    import io
+    import re
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob)) as z:
+            body = z.read("word/document.xml").decode("utf-8", "replace")
+    except Exception:
+        return ""
+    return " ".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", body))
+
+
+def content_drift(sent_html: str, got_docx: bytes) -> tuple[int, int]:
+    """(words added, words removed) between what we sent and what came back.
+
+    A multiset rather than a sequence: reordering a table's cells is not this
+    guard's business, and inventing a paragraph is.
+    """
+    from collections import Counter
+
+    before = Counter(_words(sent_html))
+    after = Counter(_words(docx_text(got_docx)))
+    added = sum((after - before).values())
+    removed = sum((before - after).values())
+    return added, removed
+
+
+@dataclass
+class Allowance:
+    """What the platform says is left, before anything is spent.
+
+    `known` is false when the balance could not be read. That is not the same
+    as zero and is never reported as one: a personal key is not an agent key,
+    and `/v1/agents/whoami` answers only the latter. An unreadable balance lets
+    the work proceed and says the number is unknown — refusing on a number
+    nobody read would be its own kind of bluff.
+    """
+
+    known: bool = False
+    remaining: int = 0
+    tier: str = ""
+
+
+def allowance(client: SuperDocsClient) -> Allowance:
+    """Trap 3, asked before the loop rather than discovered inside it.
+
+    `GET /v1/agents/whoami` carries `quota: {tier, monthly_limit, used,
+    remaining}` — the one balance read available in advance of doing work.
+    """
+    try:
+        r = client.whoami()
+    except Exception:
+        return Allowance()
+    body = r.body if isinstance(r.body, dict) else {}
+    quota = body.get("quota") or {}
+    if "remaining" not in quota:
+        return Allowance()
+    try:
+        return Allowance(known=True, remaining=int(quota["remaining"]),
+                         tier=str(quota.get("tier", "")))
+    except (TypeError, ValueError):
+        return Allowance()
 
 
 @dataclass
 class StyledResult:
     ok: bool = False
     output: bytes = b""
+    #: Set when a styled file came back but was thrown away because its text no
+    #: longer matched. Kept apart from a transport failure: one is nobody's
+    #: fault, the other is a claim we refused to pass on.
+    rejected_for_content: bool = False
     warnings: list = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     ops_charged: int = 0
     ops_confirmed: bool = False   # the async endpoints return no usage block
+    allowance_known: bool = False
+    allowance_remaining: int = 0
 
 
 def styled_export(client: SuperDocsClient, session_id: str, blocks: list[Block],
@@ -55,6 +149,17 @@ def styled_export(client: SuperDocsClient, session_id: str, blocks: list[Block],
             on_progress("superdocs", msg)
 
     html = blocks_to_html(blocks)
+
+    # 0 -- the allowance, before a single billable call. Starting a styling pass
+    # that cannot finish would leave someone watching a progress line for work
+    # that was refused at the far end.
+    left = allowance(client)
+    r.allowance_known = left.known
+    r.allowance_remaining = left.remaining
+    if left.known and left.remaining < 1:
+        say("There is no styling allowance left this month, so nothing was sent "
+            "and nothing was spent. The rebuilt file is unchanged and still yours.")
+        return r
 
     try:
         # 1 -- upload. Free.
@@ -107,7 +212,26 @@ def styled_export(client: SuperDocsClient, session_id: str, blocks: list[Block],
         if not blob:
             say("SuperDocs returned no file; keeping the plain rebuild.")
             return r
-        r.output = blob if isinstance(blob, bytes) else bytes(blob)
+        candidate = blob if isinstance(blob, bytes) else bytes(blob)
+
+        # The guard. The instruction forbids content changes; this checks
+        # rather than trusts, because a document-editing model handed a sparse
+        # recovered file will fill it out -- observed live on 2026-08-20, where
+        # a four-line report came back with invented paragraphs, a subtotal
+        # row, a disclaimer and a signature block. Handing that to somebody who
+        # came here to get their own words back is the worst output this
+        # product could produce: it opens cleanly, it looks better than the
+        # plain rebuild, and it is partly fiction.
+        added, removed = content_drift(html, candidate)
+        if added + removed > ALLOWED_WORD_DRIFT:
+            r.rejected_for_content = True
+            say("The styled version came back with the wording changed, so it "
+                "was thrown away rather than handed over. Your document should "
+                "say what you wrote. The rebuilt file is unchanged and still "
+                "yours.")
+            return r
+
+        r.output = candidate
         r.ok = True
         if not r.ops_charged:
             # The async endpoints return no usage block (see BUG-017), so a

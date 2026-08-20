@@ -83,6 +83,18 @@ it is reported:
 Not retried — that might be charged twice and might apply the same edit twice.
 ```
 
+A person opens the document, sees whether the edit is there, and says so through
+`resolve_operation`. That exit has to exist: a step that is never retried
+automatically and cannot be resolved through the surface is a step that can
+never run again.
+
+**It knows whether a failed call could have been billed.** A refused connection
+proves the request never reached SuperDocs, so a rerun may safely repeat it. A
+read timeout proves nothing — the request very possibly arrived, was charged and
+applied an edit, and only the answer was lost. Collapsing those two into "it
+failed" is how a retry pays twice, so they are recorded as different things and
+the default answer is *we do not know*.
+
 **It says what it spent, and whether that adds up.** `--receipt` prints the line
 items and reconciles them against the allowance — and when they disagree, it
 says so rather than picking a side:
@@ -110,16 +122,36 @@ fires. That is not decoration: a limit whose only feedback is *"I stopped"*
 trains the person who set it to raise the number until it stops firing, which is
 the same as not having it.
 
+## How the work is priced, and why that is the whole ballgame
+
+SuperDocs bills a **request**: most bill one operation, and very large ones bill
+one per 25 sections edited. The floor of one is therefore *per request*, not per
+plan — and this agent sends one request per step.
+
+That distinction is not a rounding error. Four five-section edits pooled to
+twenty sections price as **one** operation and bill as **four**. An agent that
+prices them pooled reports "it fits", starts, and runs out partway through
+somebody's document — which is the exact failure this build exists to prevent,
+arriving through its own arithmetic. `estimate(changes, batched=False)` is what
+the agent uses, `batched=True` is what a publisher sending one request uses, and
+`QuotaAwareAgent.BATCHED` names which one this is so the planner and the
+executor cannot drift apart about what a step costs.
+
 ## Use it as an MCP server
 
 The card is band S1 · MCP and the user is an agent, so the agent is reachable
-as one. Three tools, in the order an agent actually needs them:
+as one. Four tools, in the order an agent actually needs them:
 
 | Tool | Costs | What it answers |
 |---|---|---|
 | `check_allowance` | free | What have I got? The one authoritative read — plus anything an earlier run left unresolved. |
-| `plan_work` | free | What fits inside it — without doing any of it. |
-| `run_work` | billable | Do the part that fits; say what was left out, what was already paid for, and what it cost. |
+| `plan_work` | free | What fits inside it — without doing any of it. Given a `session_id` it also prices against the ledger, so work an earlier run already paid for is named rather than quoted. |
+| `run_work` | billable | Do the part that fits; say what was left out, what was already paid for, and what it cost. Takes HTML, or the bytes of a real `.docx` as `document_base64`. |
+| `resolve_operation` | free | A person's answer about a call that was started and never confirmed. Without it that step could never run again — a state the surface could enter and not leave. |
+
+Both `plan_work` and `run_work` take `when_it_does_not_fit`: `degrade` (do the
+highest-severity part that fits, the default) or `refuse` (start nothing rather
+than deliver a subset).
 
 **Every result carries a `budget` block**, so a calling agent never has to spend
 a turn asking what is left before it decides what to do. It carries the
@@ -189,12 +221,21 @@ and the stopping rule above.
 No key, no network, nothing to install:
 
 ```
-python3 -m pytest                 # 50 tests, offline
+python3 -m pytest                 # 69 tests, offline
 python3 backend/demo.py                   # allowance is plentiful — everything runs
 python3 backend/demo.py --scenario tight  # not enough — it degrades and explains
 python3 backend/demo.py --scenario broke  # nothing fits — it refuses to start
 python3 backend/demo.py --sample 2        # small-sample mode
 python3 backend/demo.py --receipt         # the line items, and whether they add up
+python3 backend/demo.py --scenario tight --refuse   # refuses a partial run outright
+```
+
+Graceful re-entry, shown rather than asserted — run it twice against the same
+ledger and watch the second run decline to pay for the first run's work:
+
+```
+python3 backend/demo.py --scenario tight --ledger /tmp/ops.jsonl   # does figures, dates
+python3 backend/demo.py --scenario tight --ledger /tmp/ops.jsonl   # does terms, footer
 ```
 
 Against the real API:
@@ -233,6 +274,14 @@ document write are the same shape of problem.
   prevents *this tool* from paying twice. It cannot prevent a different client,
   or a person in the web app, from making the same edit — nothing below us
   offers idempotency to build that on.
+- **The ledger is not locked against two processes running at once.** It is read
+  at start-up and appended to, so two runs launched simultaneously against the
+  same steps can both see "not yet attempted" and both pay. Sequential reruns —
+  the crash-and-resume case it was built for — are safe. A file lock would close
+  the concurrent case and is not built.
+- **A failure whose outcome is unknown needs a person, by design.** The agent
+  will not guess between paying twice and leaving work undone, so those steps
+  stay blocked until someone answers with `resolve_operation`.
 - **A reconciliation needs two authoritative balances.** If either end of the
   run was inferred, the receipt says the run cannot be reconciled rather than
   reconciling two guesses.

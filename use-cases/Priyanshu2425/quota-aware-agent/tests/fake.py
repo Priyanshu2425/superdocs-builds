@@ -65,7 +65,16 @@ class FakeSuperDocs:
                 return Response(422, {"detail": [
                     {"type": "missing", "loc": ["body", "file"], "msg": "Field required"}
                 ]})
-            self.uploaded.append(files["file"][0])
+            name, body = files["file"]
+            # The live API parses by EXTENSION, not by sniffing the bytes: HTML
+            # sent as report.docx is answered 400. Modelled here because a fake
+            # that accepts any filename is how the demo shipped uploading HTML
+            # under a .docx name and nobody found out until a live run.
+            # Verified against the live API 2026-08-20.
+            if (str(name).lower().endswith((".docx", ".xlsx", ".pptx", ".odt"))
+                    and not bytes(body)[:4] == b"PK\x03\x04"):
+                return Response(400, {"detail": "Invalid DOCX file: File is not a zip file"})
+            self.uploaded.append(name)
             return Response(200, {"status": "ok", "chunks_count": 2})
 
         if path == "/v1/chat/async":

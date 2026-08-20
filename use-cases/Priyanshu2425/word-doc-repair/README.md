@@ -41,6 +41,15 @@ they act. This is the part of the page whose honesty needs no wording at all:
 > It ran for a bit and then wanted forty dollars to download the result. It just
 > said "repair successful". I didn't know if it had actually got anything.
 
+**And it checks the styled copy before offering it.** A styling pass has no
+reason to change a single word, so the file that comes back is compared against
+what went out, word for word, and thrown away if the wording moved at all. This
+is not theoretical: on the first live run, a four-line recovered report came
+back with three invented paragraphs, a subtotal row, a disclaimer and a
+signature block. It opened cleanly and read better than the plain rebuild, and
+it was partly fiction — which for a recovery tool is the worst output there is,
+because its owner would not notice.
+
 Three things it will always do:
 
 - **Name what it lost.** Structure that could not be preserved, parts cut short
@@ -59,9 +68,15 @@ Three things it will always do:
 | **Human-in-the-loop approval** — `POST /v1/chat/{session_id}/approve` | Approving each proposed change, with the second parse its payload requires |
 | **Export** — `POST /v1/documents/export` | Getting a styled `.docx` back |
 
-All four are optional. The local rebuild is the default and needs no key, no
-network and no account — and **every failure on the SuperDocs path degrades back
-to it**, which a test asserts for each failure in turn. Details under
+All four are reachable from the page: once the plain file is downloadable, a
+**Send it for styling** button offers a second, styled copy. It is never
+automatic — someone whose document just broke should not have it sent to a
+third-party service because a page decided that for them — and the plain rebuild
+is already in their hands before the button exists.
+
+The local rebuild is the default and needs no key, no network and no account —
+and **every failure on the SuperDocs path degrades back to it**, which a test
+asserts for each failure in turn. Details under
 [Where SuperDocs fits](#where-superdocs-fits).
 
 ## Run it
@@ -80,7 +95,14 @@ build emits one self-contained file into `backend/static/`, and that file is com
 The tests, which need nothing installed and no key:
 
 ```
-python3 -m pytest                 # 55 tests, offline
+python3 -m pytest                 # 63 tests, offline
+```
+
+With the web extra installed, twelve more run the two endpoints as the page
+calls them — those skip rather than fail on a bare checkout:
+
+```
+pip install -e ".[web,dev]" && python3 -m pytest    # 76 tests
 ```
 
 To work on the page itself:
@@ -88,11 +110,11 @@ To work on the page itself:
 ```
 cd frontend
 npm install
-npm test                          # 36 tests
+npm test                          # 46 tests
 npm run build                     # rewrites static/index.html
 ```
 
-Those 36 tests render the whole page and answer it with repair streams recorded
+Those 46 tests render the whole page and answer it with repair streams recorded
 from the real engine by `tests/test_frontend_fixtures.py`, which fails if the
 recordings drift. The honesty guards — no engine vocabulary, no promise of a
 complete repair, no "what came through" on a total failure — run over what is
@@ -129,12 +151,31 @@ The tests that matter most are the ones about honesty:
 ## Where SuperDocs fits
 
 The four-call contract — upload · edit instruction · approve · export — is built
-and tested in `backend/docrepair/styled_export.py`, and runs as an optional second pass:
+and tested in `backend/docrepair/styled_export.py`, and runs as an optional
+second pass. Set a key and the page offers it; the CLI takes a flag:
 
 ```
 export SUPERDOCS_API_KEY=your-key-here
+python3 -m docrepair.web                     # the button appears on the result screen
 python3 backend/cli.py broken.docx --via-superdocs
 ```
+
+Without a key the page says so in a line rather than showing a button that
+fails when somebody presses it: `GET /api/capabilities` is asked before anything
+is offered.
+
+**The allowance is read before anything is spent.** `GET /v1/agents/whoami`
+carries the remaining balance, and a styling pass that cannot finish is refused
+before the first billable call rather than discovered halfway through — trap 3,
+asked in advance. A balance that cannot be read is *not* treated as a balance of
+zero: a personal key is not an agent key, and refusing on a number nobody
+managed to read would be its own kind of bluff.
+
+**And the result is checked, not trusted.** `content_drift` compares the words
+that came back against the words that went out. Any addition or removal and the
+styled file is discarded with the reason said plainly. The instruction was
+tightened at the same time and the same document then came back word for word
+identical — but the instruction is the request and the guard is the promise.
 
 Recovered structure goes out as clean **HTML**, never raw Word XML — the docs are
 explicit that there is no endpoint for the latter — so headings stay headings and
@@ -170,6 +211,13 @@ Nothing is written to disk and nothing is retained.
 - **An image whose header cannot be read is placed at a stated default size**
   rather than at a measurement nobody took. Its aspect ratio is left alone.
 - **Comments and tracked changes are not recovered.**
+- **The styled copy carries the recovered text and nothing else.** Pictures are
+  not sent for styling: the styling pass takes clean HTML, and an image with no
+  surviving position is not something a formatting pass can place. The plain
+  rebuild is the one that has your pictures in it.
+- **A styled copy is not always available.** It needs a key, an allowance, and a
+  result that comes back saying exactly what it was given. Any of the three
+  missing and you get the plain rebuild and a sentence saying why.
 - Direct upload only, so the practical ceiling is about 20 MB.
 - `.doc` (the pre-2007 binary format) is not a ZIP at all and is not supported —
   it is reported as unrepairable rather than silently mangled.
