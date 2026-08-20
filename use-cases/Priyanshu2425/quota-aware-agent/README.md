@@ -190,18 +190,18 @@ No key, no network, nothing to install:
 
 ```
 python3 -m pytest                 # 50 tests, offline
-python3 demo.py                   # allowance is plentiful — everything runs
-python3 demo.py --scenario tight  # not enough — it degrades and explains
-python3 demo.py --scenario broke  # nothing fits — it refuses to start
-python3 demo.py --sample 2        # small-sample mode
-python3 demo.py --receipt         # the line items, and whether they add up
+python3 backend/demo.py                   # allowance is plentiful — everything runs
+python3 backend/demo.py --scenario tight  # not enough — it degrades and explains
+python3 backend/demo.py --scenario broke  # nothing fits — it refuses to start
+python3 backend/demo.py --sample 2        # small-sample mode
+python3 backend/demo.py --receipt         # the line items, and whether they add up
 ```
 
 Against the real API:
 
 ```
 export SUPERDOCS_API_KEY=your-key-here
-python3 demo.py --live
+python3 backend/demo.py --live
 ```
 
 The transport is injected, which is why the tests need no key: the fake
@@ -210,7 +210,7 @@ envelope and a `usage` block on every billable response.
 
 ## Shared core — stated plainly
 
-`quota_aware_agent/budget.py` is shared, unchanged, with another system by the
+`backend/quota_aware_agent/budget.py` is shared, unchanged, with another system by the
 same author, where it guards the publisher that writes documents back to
 SuperDocs. It is vendored here rather than imported so this build stands alone
 in this repository.

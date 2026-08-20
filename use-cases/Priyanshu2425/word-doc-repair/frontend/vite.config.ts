@@ -6,5 +6,5 @@ import { viteSingleFile } from "vite-plugin-singlefile";
  *  build step, no Node on the machine that serves it. */
 export default defineConfig({
   plugins: [react(), viteSingleFile()],
-  build: { outDir: "../static", emptyOutDir: true, target: "es2020", cssMinify: true },
+  build: { outDir: "../backend/static", emptyOutDir: true, target: "es2020", cssMinify: true },
 });

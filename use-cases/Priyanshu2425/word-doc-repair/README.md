@@ -75,7 +75,7 @@ PORT=8077 python3 -m docrepair.web  # if 8000 is taken
 ```
 
 The page is React and TypeScript, and **you do not need Node to run it** — the
-build emits one self-contained file into `static/`, and that file is committed.
+build emits one self-contained file into `backend/static/`, and that file is committed.
 
 The tests, which need nothing installed and no key:
 
@@ -104,8 +104,8 @@ And a CLI, for a folder full of them. The engine is identical; the page is the
 product and this is the back door:
 
 ```
-python3 cli.py broken.docx
-python3 cli.py *.docx --quiet
+python3 backend/cli.py broken.docx
+python3 backend/cli.py *.docx --quiet
 ```
 
 ## How it is tested
@@ -129,11 +129,11 @@ The tests that matter most are the ones about honesty:
 ## Where SuperDocs fits
 
 The four-call contract — upload · edit instruction · approve · export — is built
-and tested in `docrepair/styled_export.py`, and runs as an optional second pass:
+and tested in `backend/docrepair/styled_export.py`, and runs as an optional second pass:
 
 ```
 export SUPERDOCS_API_KEY=your-key-here
-python3 cli.py broken.docx --via-superdocs
+python3 backend/cli.py broken.docx --via-superdocs
 ```
 
 Recovered structure goes out as clean **HTML**, never raw Word XML — the docs are
@@ -193,7 +193,7 @@ suite now guards the stage log as well as the summary.
 
 ## Shared code — stated plainly
 
-`docrepair/superdocs_client.py` is the same four-call client used by the
+`backend/docrepair/superdocs_client.py` is the same four-call client used by the
 quota-aware agent (assigned build A). It is vendored into both so each stands
 alone in the builds repository. Reuse is only a shortcut when it is hidden.
 

@@ -243,7 +243,7 @@ export default function App() {
 
         <p className="cli">
           There is a command-line version of the same engine for a folder of damaged files:{" "}
-          <code>python3 cli.py broken.docx</code>
+          <code>python3 backend/cli.py broken.docx</code>
         </p>
       </div>
 

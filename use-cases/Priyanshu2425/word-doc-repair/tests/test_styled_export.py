@@ -147,12 +147,19 @@ def test_the_vendored_client_has_not_drifted():
     the other one worked. Everything below the docstring must stay identical."""
     import pathlib
 
-    here = pathlib.Path(__file__).resolve().parents[1] / "docrepair/superdocs_client.py"
+    here = (pathlib.Path(__file__).resolve().parents[1]
+            / "backend/docrepair/superdocs_client.py")
     there = (pathlib.Path(__file__).resolve().parents[2]
-             / "quota-aware-agent/quota_aware_agent/client.py")
-    if not there.exists():           # published alone in the builds repo
+             / "quota-aware-agent/backend/quota_aware_agent/client.py")
+    origin_build = there.parents[2]
+    if not origin_build.exists():    # published alone, without its sibling
         import pytest
-        pytest.skip("the origin copy is not present in this checkout")
+        pytest.skip(f"{origin_build.name} is not in this checkout")
+    assert there.exists(), (
+        f"{origin_build.name} is here but {there.name} is not where this guard "
+        "looks. A guard that skips when its target moves is a guard that has "
+        "stopped guarding, and nothing fails."
+    )
 
     def body(p):
         return p.read_text().split('"""', 2)[2]

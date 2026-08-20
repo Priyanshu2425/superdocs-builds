@@ -2,12 +2,13 @@
 """Run the agent. With no key it runs against a documented fake, so a reviewer
 can see the behaviour without spending an operation.
 
-    python3 demo.py                     # offline, against the fake
-    python3 demo.py --scenario tight    # not enough allowance: it degrades
-    python3 demo.py --scenario broke    # no allowance: it refuses to start
-    python3 demo.py --live              # real API, needs SUPERDOCS_API_KEY
+    python3 backend/demo.py                     # offline, against the fake
+    python3 backend/demo.py --scenario tight    # not enough allowance, it degrades
+    python3 backend/demo.py --scenario broke    # no allowance, it refuses to start
+    python3 backend/demo.py --live              # real API, needs SUPERDOCS_API_KEY
 
-    --sample N   small-sample mode: run at most N steps
+    --sample N    small-sample mode: run at most N steps
+    --receipt     print the line items and whether they add up
 """
 
 from __future__ import annotations
@@ -15,6 +16,14 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
+
+# The offline demo answers with `tests/fake.py`, the same fake the suite uses,
+# so what a reviewer watches here is what the tests assert. That lives beside
+# this package rather than inside it, so the project root goes on the path --
+# the alternative is a second fake, and a fake nobody wrote cannot flatter the
+# code that calls it.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from quota_aware_agent.policy import Policy
 from quota_aware_agent import QuotaAwareAgent, Step, SuperDocsClient
