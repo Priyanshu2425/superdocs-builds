@@ -9,6 +9,11 @@ not.
 
 ![Salvage's report after recovering a truncated document: a stamped verdict, what came through, and the repaired file](screenshot.png)
 
+**How it is built, and why:** [`SYSTEM_DESIGN.html`](SYSTEM_DESIGN.html) — the
+architecture, the two paths, the three named traps and where each is answered,
+the failure matrix, and every trade-off with what it cost next to what it
+bought. Open it from disk; it needs nothing.
+
 ## What it does
 
 It opens the file the way Word will not, takes out whatever is still readable,
