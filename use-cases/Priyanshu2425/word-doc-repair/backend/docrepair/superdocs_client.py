@@ -201,6 +201,61 @@ class HttpTransport:
             ) from e
 
 
+#: What the upload endpoint parses each extension as. Verified against the live
+#: API 2026-08-20: the **filename decides the parser**, not the bytes. HTML sent
+#: as `report.docx` is answered `400 Invalid DOCX file: File is not a zip file`,
+#: and the same bytes as `report.html` are accepted. `.txt` is accepted too and
+#: parses the markup as literal text, which is worse than an error because it
+#: succeeds.
+_ZIP_EXTENSIONS = {".docx", ".xlsx", ".pptx", ".odt"}
+_PDF_EXTENSIONS = {".pdf"}
+_TEXT_EXTENSIONS = {".html", ".htm", ".txt", ".md", ".markdown", ".rtf"}
+
+
+def check_upload_name(filename: str, content: bytes) -> None:
+    """Refuse a filename whose extension disagrees with the bytes.
+
+    This is a deliberate hardcoded defence sitting in front of the intelligent
+    path, not a guess about what the caller meant. The live API decides how to
+    parse an upload from the extension alone, so `agent.run(..., "contract.docx",
+    html_bytes)` reads perfectly and fails at the platform with a message about
+    zip files, which names neither the cause nor the fix. Worse, the mismatch
+    that does NOT error — HTML uploaded as `.txt` — succeeds and quietly parses
+    the markup as literal text, and nobody finds out until the export.
+
+    So it is checked here, before anything is sent, and the error says which
+    two things disagreed and both ways to make them agree.
+    """
+    import os
+
+    ext = os.path.splitext(str(filename))[1].lower()
+    if not ext:
+        raise ValueError(
+            f"'{filename}' has no file extension. SuperDocs chooses how to parse "
+            "an upload from the extension, so give one — '.html' for HTML, "
+            "'.docx' for a Word file, '.pdf' for a PDF.")
+
+    looks_like_zip = content[:4] == b"PK\x03\x04"
+    looks_like_pdf = content[:4] == b"%PDF"
+
+    if ext in _ZIP_EXTENSIONS and not looks_like_zip:
+        raise ValueError(
+            f"'{filename}' is named as a Word-family file but the bytes are not "
+            "a zip archive, and SuperDocs parses uploads by extension — it would "
+            "answer '400 Invalid DOCX file: File is not a zip file'. Either send "
+            "the real .docx bytes, or rename this to '.html' if it is HTML.")
+    if ext in _PDF_EXTENSIONS and not looks_like_pdf:
+        raise ValueError(
+            f"'{filename}' is named as a PDF but the bytes do not begin with "
+            "'%PDF'. Send the real PDF bytes, or rename it to match what it is.")
+    if ext in _TEXT_EXTENSIONS and (looks_like_zip or looks_like_pdf):
+        raise ValueError(
+            f"'{filename}' is named as text but the bytes are a "
+            f"{'zip archive (a .docx, most likely)' if looks_like_zip else 'PDF'}. "
+            "This would be accepted and parsed as literal text rather than as a "
+            "document — rename it to match its contents.")
+
+
 def pending_changes(job_body: dict) -> list[dict]:
     """Read the proposed changes off a job, whatever shape they arrive in.
 
@@ -279,6 +334,7 @@ class SuperDocsClient:
 
     # --- call 1 of the contract: upload.
     def upload(self, session_id: str, filename: str, content: bytes) -> Response:
+        check_upload_name(filename, content)
         return self._check(
             self._t.request(
                 "POST", "/v1/documents/upload",
