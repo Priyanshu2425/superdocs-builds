@@ -48,3 +48,14 @@ test('the finding key changes when the block or the cause changes', () => {
   const second = checkRoundTrip(movedText, movedAfter).findings[0].key;
   assert.notEqual(first, second);
 });
+
+test('a baselined document is never described as clean', async () => {
+  const { formatReport } = await import('../src/index.js');
+  const report = checkRoundTrip(BEFORE, AFTER);
+  const baselined = applyBaseline(report, createBaseline(report));
+  const text = formatReport(baselined, { format: 'human', colour: false });
+  assert.doesNotMatch(text, /clean: every identifier survived/);
+  assert.match(text, /BASELINED/);
+  assert.match(text, /no new findings/);
+  assert.match(text, /baseline: 1 accepted, 1 still present here, 0 stale/);
+});

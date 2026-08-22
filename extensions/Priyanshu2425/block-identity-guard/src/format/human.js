@@ -46,7 +46,15 @@ export function formatHuman(report, options = {}) {
     + `  moved ${counts.moved}  new ${counts.added}`
     + (counts.partsOmitted ? `  parts omitted ${counts.partsOmitted}` : '')));
 
-  if (report.findings.length === 0) {
+  const baselined = report.baselined || [];
+  if (report.baselineApplied) {
+    lines.push(colour('dim',
+      `baseline: ${report.baselineApplied.accepted} accepted`
+      + `, ${report.baselineApplied.matched} still present here`
+      + `, ${report.baselineApplied.stale} stale`));
+  }
+
+  if (report.findings.length === 0 && baselined.length === 0) {
     lines.push('');
     lines.push(colour('info', 'clean: every identifier survived the round trip, in order, with its attributes.'));
     return lines.join('\n');
@@ -57,15 +65,33 @@ export function formatHuman(report, options = {}) {
     lines.push(formatFinding(finding, colour));
   }
 
+  // A baseline takes a finding out of the exit code. It never takes it out of
+  // the report: a document that lost an identifier is never described as clean.
+  if (baselined.length > 0) {
+    lines.push('');
+    lines.push(colour('dim', `accepted by the baseline -- still real, still here (${baselined.length}):`));
+    for (const finding of baselined) {
+      lines.push('');
+      lines.push(formatFinding(finding, colour));
+    }
+  }
+
   lines.push('');
-  lines.push(colour('bold', summaryLine(summary)));
+  if (report.findings.length === 0) {
+    lines.push(colour('info', 'no new findings.') + colour('dim', ` ${baselined.length} accepted by the baseline.`));
+  } else {
+    lines.push(colour('bold', summaryLine(summary))
+      + (baselined.length > 0 ? colour('dim', `, ${baselined.length} baselined`) : ''));
+  }
   return lines.join('\n');
 }
 
 function formatFinding(finding, colour) {
-  const marker = RULE_MARKERS[finding.rule] || MARKERS[finding.severity];
+  const marker = finding.baselined
+    ? 'BASELINED'
+    : (RULE_MARKERS[finding.rule] || MARKERS[finding.severity]);
   const head = [
-    colour(finding.severity, marker.padEnd(9)),
+    colour(finding.baselined ? 'notice' : finding.severity, marker.padEnd(9)),
     colour('bold', finding.rule),
   ];
   const locator = finding.locator;
