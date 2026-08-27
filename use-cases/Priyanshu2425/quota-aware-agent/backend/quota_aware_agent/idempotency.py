@@ -10,7 +10,7 @@ From the research, the failure this exists for, in the words of somebody it
 happened to: *"I reran it from nineteen. But I got the boundary wrong — I think
 I redid two or three that were already done. Paid for those twice."*
 
-Three states, and the third is the interesting one:
+Four states, and the last two are the interesting ones:
 
   ``applied``    the call completed and we saw it complete. Never repeated.
   ``in flight``  we sent the call and the process died before we learned the
@@ -19,6 +19,13 @@ Three states, and the third is the interesting one:
                  apply the same edit twice; skipping might leave the work
                  undone. There is no safe automatic answer, and inventing one
                  would be this build guessing with somebody's money.
+  ``no effect``  the job completed, it was billed, and the document did not
+                 change — the model read the instruction and declined it.
+                 Never repeated **with the same wording**, because the same
+                 words already bought the same nothing once. The retry that
+                 works is a reworded instruction, and rewording produces a
+                 different key on its own (the hash is over the instruction),
+                 so the retry needs no permission from this module.
   ``unknown``    never attempted. Do it.
 
 The ledger is content-addressed on what the call *is* — session, step,
@@ -40,6 +47,7 @@ class State(str, Enum):
     IN_FLIGHT = "in_flight"
     APPLIED = "applied"
     FAILED = "failed"
+    NO_EFFECT = "no_effect"
 
 
 @dataclass(frozen=True)
@@ -58,6 +66,11 @@ class Record:
 
         `FAILED` is repeatable because a call that failed before it was accepted
         was not charged. `IN_FLIGHT` is not, and that is the whole point.
+
+        `NO_EFFECT` is not repeatable either, and for a different reason from
+        the other two: repeating it is *safe*, it is simply known to be futile
+        and known to cost an operation. Sending the identical instruction that
+        was already declined once is paying again for the same refusal.
         """
         return self.state in (State.UNKNOWN, State.FAILED)
 
@@ -125,6 +138,22 @@ class OperationLedger:
         return self._put(Record(key=key, state=State.APPLIED,
                                 session_id=prior.session_id, step_id=prior.step_id,
                                 ops_charged=ops_charged, job_id=job_id))
+
+    def no_effect(self, key: str, *, ops_charged: int | None = None,
+                  job_id: str = "", note: str = "") -> Record:
+        """The job finished, it was billed, and the document did not move.
+
+        Its own state rather than `APPLIED`, which is what it used to be:
+        `APPLIED` made a rerun report the work as done and skip it forever, so
+        an instruction the model had declined was silently dropped and the
+        person was told it had been carried out. See BUG-101.
+        """
+        prior = self.get(key)
+        return self._put(Record(
+            key=key, state=State.NO_EFFECT, session_id=prior.session_id,
+            step_id=prior.step_id, ops_charged=ops_charged, job_id=job_id,
+            note=note or "the job completed and the document did not change",
+        ))
 
     def failed(self, key: str, note: str = "") -> Record:
         """The call was never accepted, so it was never charged.

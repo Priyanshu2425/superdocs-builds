@@ -39,7 +39,38 @@ RELAY_SUPERDOCS_PATH = "/v1/superdocs"
 #: SuperDocs operations the relay lends per key per day, resetting at 00:00 UTC.
 #: A *second* ceiling sitting under the account's monthly allowance; `budget.py`
 #: models it, because this file must not be the place that decides what fits.
+#:
+#: This is the DEFAULT, not a law. It is what the account behind the relay could
+#: actually lend when this build was written, and the account behind a relay can
+#: change without a line of this code changing -- so `RELAY_DAILY_OPS` in the
+#: environment overrides it. A number nobody can correct without an edit is a
+#: number that goes stale silently, which is the failure this whole build exists
+#: to refuse.
 RELAY_DAILY_OPS = 460
+
+#: The environment variable that overrides it. Read only on the relay path: the
+#: direct path has no second ceiling to raise or lower.
+RELAY_DAILY_OPS_ENV = "RELAY_DAILY_OPS"
+
+
+def relay_daily_ops(env: Mapping[str, str] | None = None) -> int:
+    """Today's ration, from the environment or the default.
+
+    A value that is not a non-negative integer is ignored rather than raised on:
+    the ration is a ceiling this build applies to itself, and refusing to start
+    because somebody typed `RELAY_DAILY_OPS=lots` would trade a small
+    misconfiguration for a total outage. Zero is honoured -- "the lender has
+    nothing left today" is a thing a person may genuinely want to say.
+    """
+    env = os.environ if env is None else env
+    raw = (env.get(RELAY_DAILY_OPS_ENV) or "").strip()
+    if not raw:
+        return RELAY_DAILY_OPS
+    try:
+        ops = int(raw)
+    except ValueError:
+        return RELAY_DAILY_OPS
+    return ops if ops >= 0 else RELAY_DAILY_OPS
 
 #: Sent on every request. Not politeness: the relay sits behind Cloudflare,
 #: which answers the stdlib default `Python-urllib/3.x` with `403 error code:
@@ -77,8 +108,26 @@ class Response:
     def usage(self) -> dict:
         """The usage block rides on every chat response. It is the only way to
         read the balance from an API-key context -- the account usage endpoints
-        reject `sk_` keys with a 401."""
-        return self.body.get("usage", {}) or {}
+        reject `sk_` keys with a 401.
+
+        **It arrives at two depths, and both are documented.** Synchronous
+        `POST /v1/chat` puts it at the top level. A job read back with
+        `GET /v1/jobs/{id}` puts it inside `result` alongside `response` and
+        `document_changes` -- the docs' own completed-job payload shows it there.
+        Reading only the top level is why every live run reported its balance as
+        inferred: the async edit call returns no usage at all, the poll that
+        completes the job returns a real one, and the real one was invisible.
+        Verified live 2026-08-27: a completed chat job carried
+        `result.usage = {ops_charged: 1, monthly_remaining: 500, ...}` while the
+        receipt printed "cannot be reconciled".
+        """
+        top = self.body.get("usage")
+        if top:
+            return top
+        result = self.body.get("result")
+        if isinstance(result, dict):
+            return result.get("usage") or {}
+        return {}
 
 
 @dataclass(frozen=True)
@@ -132,7 +181,7 @@ def resolve(env: Mapping[str, str] | None = None) -> Endpoint:
     relay_key = (env.get("RELAY_KEY") or "").strip()
     if relay_url and relay_key:
         return Endpoint(base=relay_url + RELAY_SUPERDOCS_PATH, key=relay_key,
-                        using_relay=True, daily_ration=RELAY_DAILY_OPS)
+                        using_relay=True, daily_ration=relay_daily_ops(env))
 
     raise RuntimeError(NO_CREDENTIALS)
 
@@ -303,7 +352,7 @@ def stop_signal(status: int, body: Any, headers: Mapping[str, Any] | None) -> No
                 if wait else " It resets at 00:00 UTC.")
         raise RationExhausted(
             status, body,
-            f"The shared relay lends {RELAY_DAILY_OPS} SuperDocs operations per "
+            f"The shared relay lends {relay_daily_ops()} SuperDocs operations per "
             f"key per day and today's are spent, so this was refused and NOT "
             f"billed.{when} Set SUPERDOCS_API_KEY to your own key to bypass the "
             "ration entirely, or wait. Retrying will not help.",

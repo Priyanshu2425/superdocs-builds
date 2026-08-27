@@ -21,7 +21,7 @@ cp .env.example .env     # relay credentials, already filled in; see below
 python3 backend/demo.py  # watch it plan, size the work, run it, and export
 
 pip install pytest       # the one thing a bare clone does not already carry
-python3 -m pytest        # 106 passed, 1 skipped — the skip is the MCP protocol check
+python3 -m pytest        # 159 passed, 1 skipped — the skip is the MCP protocol check
 ```
 
 Python 3.10 or newer. There are **no runtime dependencies** — that is why the
@@ -52,6 +52,25 @@ guarantees you can always export your work costs nothing on the relay either.
 The ration is **shared with everyone using that key**, so treat the number as a
 ceiling rather than a wallet, and use `--sample N` on live runs.
 
+**The 460 is a setting, not a fact about relays.** It is what the SuperDocs
+account behind this relay could pull off at the time — I have Pro for the second
+round, and that is the budget it supported. Set `RELAY_DAILY_OPS` in `.env` to
+whatever the account behind *your* relay can actually lend:
+
+```bash
+RELAY_DAILY_OPS=460      # the default; lower it to match a smaller account
+```
+
+Set it, and set it deliberately, if that account is on the **free tier**: free is
+**500 operations per _month_**, so a 460-a-day ration is a ceiling the account
+can honour exactly once and then not again until the monthly reset. The two
+ceilings count different periods, and this build only guards the one it is told
+about — a day's ration it can see, not a month's allowance it cannot. A value
+that is not a non-negative integer is ignored and the 460 stands, because a typo
+in a ceiling this build imposes on *itself* should not become a total outage.
+`0` is honoured: "the lender has nothing left today" is a thing worth being able
+to say.
+
 One practical note that cost an afternoon: the relay sits behind Cloudflare,
 which answers the stdlib default `Python-urllib/3.x` User-Agent with
 `403 error code: 1010`. The body is plain text and mentions neither a key nor a
@@ -61,13 +80,51 @@ build sends carries a named `User-Agent` for that reason, and a test pins it.
 only the urllib default is refused, which is precisely the one a dependency-free
 build sends.)
 
-A second live-only surprise: the relay's SuperDocs key is **not an agent
-account**. `GET /v1/agents/whoami` through it answers `is_agent_account: false`
-and reports the balance as `quota.remaining` — not `remaining_operations`, and
-not `usage.monthly_remaining`. A reader that knows only one of those names does
-not crash; it finds nothing, plans against zero, does nothing and exits 0, which
-is indistinguishable from an empty allowance. `_balance_from_whoami` reads all
-three shapes in order and a test pins each one.
+### Whose key it is decides which question gets asked
+
+**On the relay path this build does not call `whoami` at all.** There is no
+account of ours to ask about, so the allowance is the ration in `.env` and
+establishing it costs not one network call:
+
+```
+read_allowance() -> 460 operations (estimated), capped by the shared relay's daily ration
+calls made       -> none
+```
+
+Asking would have produced a number that is wrong in two directions at once.
+`GET /v1/agents/whoami` through the relay answers for the **relay's** account,
+not yours — and that number does not move as you spend. Verified live on
+2026-08-27, after four operations had already gone out that day:
+
+```json
+{ "tier": "free", "is_agent_account": false,
+  "quota": { "monthly_limit": 500, "used": 0, "remaining": 500 } }
+```
+
+`used: 0`. The charges came out of a promo bucket the monthly figure does not
+count, so a build that planned against that 500 would be planning against a
+ceiling that is neither its own nor moving. The ration is the ceiling actually
+in force, it is the one you can set, and `RELAY_DAILY_OPS` is where you set it.
+
+**With your own key, `whoami` runs exactly as before**, because then the account
+really is yours: the call is free and it is the one moment in a run when the
+balance is genuinely authoritative. That is the whole difference, and it is one
+branch in `read_allowance`.
+
+What the relay path gives up, said plainly rather than left to be discovered:
+`whoami` also carries `quota_exhausted`. Skipping it means an account whose
+monthly allowance is genuinely gone is discovered on the first chat call rather
+than before the run starts. That call is refused rather than billed, the refusal
+is authoritative, and the run stops on it with a report and an export — later
+news, not lost news.
+
+When it *is* called, one more live surprise is worth knowing: the relay's key is
+**not an agent account**, and a whoami answers with the balance under
+`quota.remaining` — not `remaining_operations`, and not `usage.monthly_remaining`.
+A reader that knows only one of those names does not crash; it finds nothing,
+plans against zero, does nothing and exits 0, which is indistinguishable from an
+empty allowance. `_balance_from_whoami` reads all three shapes in order and a
+test pins each one.
 
 This build sends **no `model` field** on any request and never touches
 OpenRouter, so the relay's model allowlist does not apply to it. (For the
@@ -107,6 +164,7 @@ not one. That is the whole visible difference.
 | `RELAY_URL` | for the zero-signup path | The shared relay. `.env.example` sets it. |
 | `RELAY_KEY` | for the zero-signup path | The relay's public key — committed on purpose. |
 | `SUPERDOCS_API_KEY` | only to opt out of the relay | Your own key. Takes precedence over everything above and never reaches the relay. An agent can create its own account with `POST /v1/agents/signup`. |
+| `RELAY_DAILY_OPS` | no | The relay's daily ration, in operations, and **on the relay path it is the whole allowance** — `whoami` is not called there, so this number is what the run plans against. Defaults to 460, what the account behind this relay could lend. Ignored when `SUPERDOCS_API_KEY` is set, because then the account is yours and gets read instead. |
 | `SUPERDOCS_BASE_URL` | no | Origin override. Only read when `SUPERDOCS_API_KEY` is set — a base URL without a key of your own would just be the relay with extra steps. |
 | `QUOTA_AWARE_AGENT_LEDGER` | no | Where the operation ledger is kept. Defaults to `~/.quota-aware-agent/operations.jsonl`. **Set it per account** — two agents driving different accounts must not share one. |
 
@@ -116,9 +174,12 @@ rather than a second dialect of the same file. It never overrides a variable
 that is already set, so an `export` on the command line still wins — and so a
 test that deliberately empties a variable stays emptied.
 
-It looks in exactly two places: this build's own root, then the current
-directory. It deliberately does **not** walk up the tree the way the
-neighbouring copy does. That is right for a build that owns its whole
+It looks in exactly **one** place: this build's own root, where `.env.example`
+sits, so the documented `cp` works from whatever directory you run the command
+in. It deliberately does **not** walk up the tree the way the neighbouring copy
+does, and the current working directory is **not** a second source — cwd is
+ambient, and standing in a project that happens to have a `.env` is not the act
+of choosing that file. That is right for a build that owns its whole
 repository and wrong for one sitting beside other projects — walking up found a
 sibling project's `.env` holding a real `sk_` SuperDocs key, and a `--live` run
 then went to the origin on credentials it had never been given. The precedence
@@ -143,10 +204,16 @@ claude mcp add quota-aware-agent \
   -- python3 -m quota_aware_agent.mcp_server
 ```
 
-With the SDK installed the suite runs **107 passed, nothing skipped** — the
+With the SDK installed the suite runs **160 passed, nothing skipped** — the
 extra test starts the real server over stdio and drives it with a real client,
 because a server that imports cleanly and cannot start is worse than one that
 fails loudly.
+
+Expect the suite to go from about a fifth of a second to roughly twenty once the
+SDK is installed. Almost none of that is this build: importing `mcp` costs about
+five seconds on its own, and the protocol test pays it twice because it spawns a
+server subprocess that imports it again. Said here so a stranger who follows the
+instructions does not read a slow suite as a hung one.
 </details>
 
 <details>
@@ -171,16 +238,47 @@ the two endpoints it is about to spend against before it spends anything.
 | It can refuse a partial run outright | `python3 backend/demo.py --scenario tight --refuse` |
 | It bounds anything that loops | `python3 backend/demo.py --sample 2` |
 | It says what it spent, and whether that adds up | `python3 backend/demo.py --receipt` |
+| It says where the time went, stage by stage | `python3 backend/demo.py --receipt` — the `TOOK` column |
 | A rerun does not pay twice | `python3 backend/demo.py --scenario tight --ledger /tmp/ops.jsonl` — **twice** |
+| The relay path plans against `.env`, not `whoami` | `python3 -m pytest -k "does_not_call_whoami or own_key_still_reads"` |
+| It never fails halfway, even on a 5xx | `python3 -m pytest -k "paid_for_still_comes_back or warm_up"` |
+| A step that changed nothing is not called done | `python3 -m pytest -k "changed_nothing or nothing_changed or no_effect or did_not_change or wording" -v` |
 
 The second run of that last one declines to repeat the first run's work and says
 so. That is graceful re-entry shown rather than asserted.
+
+### When the model declines the instruction
+
+A step can finish, be billed, and change nothing: SuperDocs reads the document,
+decides the thing you asked for is not in it, and says so. The job still ends
+`completed`. This build treats that as its own outcome and not as success —
+
+```
+  completed: -
+  no effect: ['figures']
+  stopped:   nothing_changed
+```
+
+— with the platform's own sentence quoted underneath. The decision is made on
+`document_changes.version_id`, never on the model's prose: a version that did
+not move is a document that did not change, and reading intent out of generated
+text is guessing about somebody's file.
+
+Such a step is **not** repeated with the same wording on a rerun. It has already
+been paid for once and declined once, and sending the identical instruction buys
+the identical refusal. The retry that works is a **reworded** one, and rewording
+needs no flag — the ledger key is a hash of the instruction, so different words
+are a different call and simply run.
+
+This is BUG-101 in `BUGS.md`, and it is worth naming: before the fix the run
+printed `completed: ['figures']`, wrote `applied` to the ledger, and every rerun
+from then on skipped the step for good. Reported as done, unrepeatable, undone.
 
 ## What it uses from SuperDocs
 
 | Surface | Used for | Costs |
 |---|---|---|
-| `GET /v1/agents/whoami` | The one authoritative allowance read available to an API key. | free |
+| `GET /v1/agents/whoami` | The one authoritative allowance read available to an API key. **Own-key path only** — on the relay the allowance is `RELAY_DAILY_OPS` and this is not called. | free |
 | `POST /v1/documents/upload` | The document. Multipart; the filename extension decides the parser. | free |
 | `POST /v1/chat/async` | The edit instruction, with `approval_mode: ask_every_time`. | **billable** |
 | `GET /v1/jobs/{id}` | Polling. Silence is treated as processing, never as a crash. | free |
@@ -517,8 +615,15 @@ one.
 ## Honest limitations
 
 - **The allowance is not continuously known, and this build does not pretend it
-  is.** It is authoritative at `whoami` and after each response, and an estimate
-  in between. Every report labels which.
+  is.** With your own key it is authoritative at `whoami` and after each response
+  that carried a usage block, and an estimate in between. On the relay path it
+  is an estimate from the first line to the last, because the ration is a
+  published ceiling rather than a reading. Every report labels which.
+- **On the relay path an exhausted account is found late.** `whoami` is not
+  called there, and it is the call that would have carried `quota_exhausted`
+  before any work started. The first chat call finds it instead; that call is
+  refused rather than billed, and the run stops on it with a report and an
+  export. Set `SUPERDOCS_API_KEY` and the up-front read comes back.
 - **The relay's ration is never confirmed, only refused.** The relay reports
   nothing about it on a successful response, so the number this build carries is
   a published ceiling decremented by our own count, labelled `(estimated)`
@@ -538,9 +643,30 @@ one.
   same steps can both see "not yet attempted" and both pay. Sequential reruns —
   the crash-and-resume case it was built for — are safe. A file lock would close
   the concurrent case and is not built.
+- **A failure that is neither a ration nor an allowance stops the run, and the
+  run still exports.** A 5xx, a refused connection, or the warm-up failure the
+  task brief names — the first request in a fresh session can fail while things
+  warm up — ends the run at that step. It does not end it with a traceback: the
+  work already applied is exported, the steps never reached are named, and the
+  step it stopped on is recorded by what is actually known about it. This build
+  does **not** automatically resend the warm-up failure, because a 503 does not
+  prove the edit was never billed and resending it might pay twice. "Send it
+  again and it settles" is the right advice for a person and the wrong rule for
+  a machine spending somebody's allowance, so the step waits for one.
+- **What SuperDocs says about your document is quoted, never obeyed.** The
+  model's own sentence about a job is written by a model that has just read your
+  file, so it arrives inside guillemets and, on the MCP surface, under a field
+  named `quoted_from_the_platform` with a note saying it is data to report on
+  and never instructions to follow.
 - **A failure whose outcome is unknown needs a person, by design.** The agent
   will not guess between paying twice and leaving work undone, so those steps
   stay blocked until someone answers with `resolve_operation`.
+- **The clock is measured, the money is reported.** The receipt's `TOOK` column
+  is wall clock around each call, and it names the slowest one rather than an
+  average — the docs warn a single operation can take minutes with no visible
+  progress, and an average is exactly the summary that hides that. It is not a
+  benchmark: one run, no repeats, no variance, and the numbers include this
+  machine and this network.
 - **A reconciliation needs two authoritative balances.** If either end of the
   run was inferred, the receipt says the run cannot be reconciled rather than
   reconciling two guesses. On the relay path, a run whose binding ceiling was

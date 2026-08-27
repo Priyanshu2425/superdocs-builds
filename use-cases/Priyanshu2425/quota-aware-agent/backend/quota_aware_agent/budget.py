@@ -207,6 +207,29 @@ class BudgetGuard:
             return ""
         return self._exhausted_because or MONTHLY_EXHAUSTED
 
+    def seed_from_ration(self, ops: int, *, source: str = RELAY_RATION,
+                         resets_at: str = "00:00 UTC") -> Balance:
+        """The starting allowance when the ration is the only ceiling we own.
+
+        On the relay path there is no account of ours to read. `whoami` there
+        answers about the *relay's* account, and that number is somebody else's
+        in both directions: it is not the ceiling we are actually spending
+        against, and it does not move as we spend -- verified live 2026-08-27,
+        where it read `used: 0, remaining: 500` after four operations had gone
+        out that day, because the charges came from a promo bucket the monthly
+        figure does not count. A number that is true about the wrong account and
+        static besides is worse than no number, so the published ration is what
+        gets planned against.
+
+        `authoritative=False` for the same reason `open_ration` uses it: a
+        published ceiling is a claim about what is lent per day, never a reading
+        of how much of today is left, and part of it may already be gone to
+        somebody else on the same shared key.
+        """
+        self._balance = Balance(max(0, ops), authoritative=False,
+                                as_of=resets_at, limited_by=source)
+        return self.remaining()
+
     def seed_from_whoami(self, remaining_ops: int, as_of: str = "") -> Balance:
         """The agent whoami call does accept an agent key, so this is the one
         moment the balance is genuinely authoritative before work begins."""

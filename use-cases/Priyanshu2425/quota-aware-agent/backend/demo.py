@@ -42,12 +42,34 @@ WORK = [
 SCENARIOS = {"roomy": 500, "tight": 3, "broke": 1}
 
 
+def at_least_one(raw: str) -> int:
+    """A sample bound argparse can refuse in one line.
+
+    `Policy` raises on a bound below 1, which is right -- but raised out of a
+    constructor it reached the reader as a nine-frame traceback for a typo, on
+    a build whose whole argument is that a refusal should read as a sentence.
+    argparse already knows how to say this. BUG-103.
+    """
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--sample takes a whole number of steps, not {raw!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(
+            f"--sample must be at least 1, and this is {value}: a bound below "
+            "one would do nothing and say nothing. Leave --sample off to run "
+            "every step that fits.")
+    return value
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--scenario", choices=sorted(SCENARIOS), default="roomy")
     p.add_argument("--live", action="store_true", help="use the real API")
-    p.add_argument("--sample", type=int, default=None, help="run at most N steps")
+    p.add_argument("--sample", type=at_least_one, default=None,
+                   help="run at most N steps")
     # HTML content, so an HTML name. SuperDocs picks its parser from the
     # extension, so "contract.docx" holding HTML is a 400 on a live run.
     p.add_argument("--file", default="contract.html")
@@ -100,6 +122,8 @@ def main(argv=None) -> int:
     print(f"  planned:   {report.planned or '-'}")
     print(f"  completed: {report.completed or '-'}")
     print(f"  deferred:  {report.deferred or '-'}")
+    print(f"  no effect: {report.no_effect or '-'}")
+    print(f"  failed:    {report.failed or '-'}")
     print(f"  stopped:   {report.stop_reason.value}")
     if a.receipt:
         print()

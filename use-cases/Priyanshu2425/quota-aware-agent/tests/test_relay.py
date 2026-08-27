@@ -59,6 +59,44 @@ def test_the_relay_base_is_the_url_plus_the_prefix_and_the_paths_do_not_move():
     assert e.using_relay and e.daily_ration == RELAY_DAILY_OPS
 
 
+def test_the_ration_can_be_set_in_the_environment():
+    """The account behind a relay is not fixed and neither is what it can lend.
+    460 was what the account behind this one could pull off on a free tier of
+    500 operations a MONTH -- so the number had a shelf life measured in days,
+    and a ceiling only an edit can correct goes stale without saying so."""
+    e = resolve({"RELAY_URL": RELAY, "RELAY_KEY": "pk_shared",
+                 "RELAY_DAILY_OPS": "40"})
+
+    assert e.daily_ration == 40
+
+
+def test_a_ration_of_zero_is_honoured_rather_than_treated_as_unset():
+    """'The lender has nothing left today' is a thing a person means to say,
+    and it is exactly the thing a falsy check would throw away."""
+    e = resolve({"RELAY_URL": RELAY, "RELAY_KEY": "pk_shared",
+                 "RELAY_DAILY_OPS": "0"})
+
+    assert e.daily_ration == 0
+
+
+@pytest.mark.parametrize("bad", ["lots", "", "  ", "-5", "12.5"])
+def test_a_ration_that_is_not_a_number_falls_back_rather_than_failing_to_start(bad):
+    """A typo in a self-imposed ceiling must not become a total outage: the
+    ration is this build's own restraint, not a credential."""
+    e = resolve({"RELAY_URL": RELAY, "RELAY_KEY": "pk_shared",
+                 "RELAY_DAILY_OPS": bad})
+
+    assert e.daily_ration == RELAY_DAILY_OPS
+
+
+def test_the_ration_override_is_ignored_on_your_own_key():
+    """There is no second ceiling on the direct path, so there is nothing for
+    the variable to raise or lower -- and `daily_ration=None` says so."""
+    e = resolve({"SUPERDOCS_API_KEY": "sk_mine", "RELAY_DAILY_OPS": "40"})
+
+    assert e.daily_ration is None
+
+
 def test_a_base_url_override_only_applies_to_your_own_key():
     e = resolve({"SUPERDOCS_API_KEY": "sk_mine",
                  "SUPERDOCS_BASE_URL": "https://staging.example/"})
@@ -321,6 +359,17 @@ class _RationedFake(FakeSuperDocs):
         self.using_relay = True
 
 
+@pytest.fixture
+def mcp_relay(monkeypatch, tmp_path):
+    """The MCP module, wired to a relay-shaped fake."""
+    from quota_aware_agent import mcp_server as m
+    fake = _RationedFake(ration=460, remaining=500)
+    monkeypatch.setattr(m, "_client",
+                        lambda: SuperDocsClient(fake, sleep=lambda s: None))
+    monkeypatch.setattr(m, "LEDGER_PATH", str(tmp_path / "ops.jsonl"))
+    return fake
+
+
 def _agent(transport, **kw):
     return QuotaAwareAgent(SuperDocsClient(transport, sleep=lambda s: None), **kw)
 
@@ -440,10 +489,19 @@ def test_the_dotenv_loader_does_not_reach_outside_this_build(tmp_path,
 
     from quota_aware_agent import _load_dotenv
 
-    build_root = pathlib.Path(
-        __file__).resolve().parents[1]
-    if (build_root / ".env").is_file():
-        pytest.skip("this checkout has its own .env, which rightly wins")
+    # The skip is narrow on purpose. It used to be "this checkout has a .env",
+    # which is what `cp .env.example .env` -- the README's own first step --
+    # produces, so the one test standing between a sibling's `sk_` key and a
+    # `--live` run switched itself off in the configuration everybody is told
+    # to use. A copied `.env.example` leaves SUPERDOCS_API_KEY commented out and
+    # cannot make this assertion pass falsely; only a checkout that really sets
+    # its own key can, and that is the only case worth stepping around.
+    build_root = pathlib.Path(__file__).resolve().parents[1]
+    env_file = build_root / ".env"
+    if env_file.is_file() and any(
+            line.strip().startswith("SUPERDOCS_API_KEY=")
+            for line in env_file.read_text().splitlines()):
+        pytest.skip("this checkout sets its own SUPERDOCS_API_KEY, which rightly wins")
 
     (tmp_path / "somebody_elses.env").write_text("")
     (tmp_path / ".env").write_text("SUPERDOCS_API_KEY=sk_not_yours\n")
@@ -517,3 +575,91 @@ def test_an_unreadable_whoami_stops_the_run_out_loud():
     assert report.completed == []
     assert report.stop_reason is StopReason.NOTHING_FITS
     assert "no operations available to spend" in report.plain_language()
+
+
+# -- 6. whose key it is decides which question gets asked --------------------
+
+def test_the_relay_path_does_not_call_whoami_at_all():
+    """There is no account of ours to ask about. whoami on the relay answers
+    for the RELAY's account, and that number is wrong twice over: it is not the
+    ceiling we spend against, and it does not move as we spend -- live it read
+    `used: 0, remaining: 500` after four operations had gone out that day."""
+    fake = _RationedFake(ration=460, remaining=500)
+    balance = _agent(fake).read_allowance()
+
+    assert "/v1/agents/whoami" not in [p for _, p in fake.calls]
+    assert balance.ops == 460
+
+
+def test_the_ration_from_the_environment_is_what_gets_planned_against():
+    fake = _RationedFake(ration=40, remaining=500)
+    a = _agent(fake, policy=Policy(reserve=0))
+    a.read_allowance()
+
+    plan = a.plan([Step(f"s{i}", "edit", 1) for i in range(60)])
+    assert len(plan.publish) == 40
+    assert len(plan.defer) == 20
+
+
+def test_a_ration_seeded_balance_never_claims_to_be_a_reading():
+    """A published ceiling is what the lender says it lends per day, never how
+    much of today is left -- and part of it may already be gone to somebody
+    else on the same shared key."""
+    balance = _agent(_RationedFake(ration=460, remaining=500)).read_allowance()
+
+    assert not balance.authoritative
+    assert balance.limited_by == RELAY_RATION
+    assert "estimated" in str(balance)
+
+
+def test_your_own_key_still_reads_the_account_it_actually_owns():
+    """The other half of the rule. With SUPERDOCS_API_KEY the account IS yours,
+    so it is read, and that read is the one authoritative moment in a run."""
+    fake = FakeSuperDocs(remaining=321)          # no ration, no relay
+    balance = _agent(fake).read_allowance()
+
+    assert "/v1/agents/whoami" in [p for _, p in fake.calls]
+    assert balance.ops == 321 and balance.authoritative
+
+
+def test_the_hint_still_names_the_ration_as_the_binding_ceiling():
+    """It stopped being the same object as the balance when the balance began
+    to come from it; it must not stop being reported as the thing in force."""
+    a = _agent(_RationedFake(ration=5, remaining=500))
+    a.read_allowance()
+
+    assert a.budget_hint()["daily_ration"]["binding"] is True
+
+
+def test_the_note_beside_the_number_does_not_contradict_the_flag_beside_it():
+    """Found by driving the MCP server over stdio and reading what came back:
+    `"authoritative": false` sat directly beside `"note": "Authoritative right
+    now."` -- hardcoded prose still telling the whoami story on a path where
+    whoami is never called. A machine reading the note gets the opposite of the
+    field, and the field is the one that is right."""
+    from quota_aware_agent import mcp_server as m
+
+    a = _agent(_RationedFake(ration=460, remaining=500))
+    hint = a.budget_hint()
+
+    assert a.uses_a_relay
+    assert not hint["authoritative"]
+    assert "Authoritative at whoami" not in hint["note"]
+    assert "published daily ration" in hint["note"]
+
+
+def test_your_own_key_still_gets_the_sentence_that_is_true_for_it():
+    a = _agent(FakeSuperDocs(remaining=500))
+    hint = a.budget_hint()
+
+    assert not a.uses_a_relay
+    assert "Authoritative at whoami" in hint["note"]
+
+
+def test_the_allowance_tool_says_which_kind_of_number_it_handed_back(mcp_relay):
+    from quota_aware_agent import mcp_server as m
+
+    out = m.check_allowance()
+    assert out["authoritative"] is False
+    assert "not a reading" in out["note"] or "rather than a reading" in out["note"]
+    assert "RELAY_DAILY_OPS" in out["note"]

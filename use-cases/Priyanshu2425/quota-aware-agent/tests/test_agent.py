@@ -215,7 +215,12 @@ def test_a_billable_call_with_no_usage_block_stops_claiming_confirmed():
         def request(self, method, path, **kw):
             r = super().request(method, path, **kw)
             if isinstance(r.body, dict):
+                # Both depths. Usage rides inside `result` on a job read back,
+                # so stripping only the top level would leave the very block
+                # this test is about. See BUG-102.
                 r.body.pop("usage", None)
+                if isinstance(r.body.get("result"), dict):
+                    r.body["result"].pop("usage", None)
             return r
 
     fake = NoUsage(remaining=500)

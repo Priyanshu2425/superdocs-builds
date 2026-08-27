@@ -41,6 +41,8 @@ class StopReason(str, Enum):
     REFUSED_PARTIAL = "refused_partial"
     SAMPLE_BOUND = "sample_bound"
     ALREADY_APPLIED = "already_applied"
+    NOTHING_CHANGED = "nothing_changed"
+    PLATFORM_ERROR = "platform_error"
     STARTED_AND_UNKNOWN = "started_and_unknown"
 
     def explain(self) -> str:
@@ -49,6 +51,22 @@ class StopReason(str, Enum):
 
 _WHY: dict[StopReason, str] = {
     StopReason.COMPLETED: "All of the requested work was done.",
+    StopReason.PLATFORM_ERROR: (
+        "A call failed in a way that is neither a ration nor an allowance — a "
+        "5xx, a refused connection, a read that never returned. The run stops "
+        "there rather than pressing on, and it stops WITH a report and an "
+        "export: work already applied and already paid for comes back as a "
+        "file. The step it stopped on is recorded by what is actually known "
+        "about it, which is usually 'sent, outcome never learned' — so it "
+        "waits for a person instead of being retried into a second charge."
+    ),
+    StopReason.NOTHING_CHANGED: (
+        "Every step that ran finished, was billed, and left the document "
+        "exactly as it arrived — the model read the instructions and declined "
+        "them. Reported as its own ending rather than as 'completed', because "
+        "a caller reading only the stop reason would otherwise be told the "
+        "work was carried out. Reword the instructions and run them again."
+    ),
     StopReason.QUOTA_EXHAUSTED: (
         "SuperDocs itself reported the allowance exhausted. That is the "
         "platform's own signal and the only authoritative one — our arithmetic "
@@ -115,7 +133,10 @@ class Policy:
         if self.reserve < 0:
             raise ValueError("a reserve cannot be negative")
         if self.max_steps is not None and self.max_steps < 1:
-            raise ValueError("a sample bound of zero would do nothing and say nothing")
+            raise ValueError(
+                f"a sample bound must be at least 1, and this one is "
+                f"{self.max_steps}: a bound of zero would do nothing and say "
+                "nothing, and a negative one is not a number of steps")
 
     def spendable(self, remaining_ops: int) -> int:
         """What may be spent on new edits, which is not what is left."""
