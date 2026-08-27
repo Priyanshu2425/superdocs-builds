@@ -230,3 +230,105 @@ describe("a preview that could not be rendered", () => {
     expect(screen.getByText("Quarterly Report")).toBeInTheDocument();
   });
 });
+
+describe("a change is proposed before it is made", () => {
+  const proposal = {
+    asked: "",
+    changes: [
+      {
+        change_id: "ch_1",
+        operation: "edit",
+        chunk_id: "c-1",
+        old_html: "<h1>Notes</h1>",
+        new_html: "<h2>Notes</h2>",
+        ai_explanation: "Made the heading one size smaller.",
+      },
+    ],
+  };
+
+  async function proposed() {
+    const user = await repaired();
+    await openTheDoor(user);
+    serveTurn({
+      applied: false,
+      pending: proposal,
+      note: "SuperDocs proposes 1 change. Nothing has changed yet — read it and decide.",
+    });
+    await user.type(
+      screen.getByPlaceholderText(/what should be different/i),
+      "Make the headings smaller",
+    );
+    await user.click(screen.getByRole("button", { name: /^send$/i }));
+    await screen.findByRole("region", { name: /a change waiting for you/i });
+    return user;
+  }
+
+  it("shows what would change, and why, before anything changes", async () => {
+    await proposed();
+
+    const review = within(
+      screen.getByRole("region", { name: /a change waiting for you/i }),
+    );
+    // The reason the API documentation says to show the person.
+    review.getByText(/made the heading one size smaller/i);
+    // Both sides of it, as the document reads rather than as markup.
+    review.getByText("Now");
+    review.getByText("Would become");
+    // And it says plainly that nothing has happened yet.
+    expect(
+      review.getByText(/your document stays exactly as it is unless you keep this/i),
+    ).toBeTruthy();
+  });
+
+  it("puts the field away while the question is on screen", async () => {
+    await proposed();
+
+    // One question at a time: typing another instruction on top of an
+    // undecided one is how a person ends up not knowing what they agreed to.
+    expect(screen.queryByPlaceholderText(/what should be different/i)).toBeNull();
+    screen.getByRole("button", { name: /keep this change/i });
+    screen.getByRole("button", { name: /discard/i });
+  });
+
+  it("costs nothing until it is kept, and says so", async () => {
+    await proposed();
+
+    const review = within(
+      screen.getByRole("region", { name: /a change waiting for you/i }),
+    );
+    review.getByText(/discarding costs you nothing/i);
+    // The count has not moved: proposing is free.
+    expect(screen.queryByText(/9 changes left/i)).toBeNull();
+  });
+
+  it("keeping it applies it and spends one change", async () => {
+    const user = await proposed();
+
+    await user.click(screen.getByRole("button", { name: /keep this change/i }));
+
+    await waitFor(() => {
+      expect(said().getByText(/superdocs applied your change/i)).toBeTruthy();
+    });
+    expect(
+      screen.queryByRole("region", { name: /a change waiting for you/i }),
+    ).toBeNull();
+    // The field is back, and the change is counted.
+    screen.getByPlaceholderText(/what should be different/i);
+    await screen.findByText(/9 changes left on this document/i);
+  });
+
+  it("discarding it leaves the document alone and spends nothing", async () => {
+    const user = await proposed();
+
+    await user.click(screen.getByRole("button", { name: /discard/i }));
+
+    await waitFor(() => {
+      expect(said().getByText(/nothing was changed/i)).toBeTruthy();
+    });
+    expect(
+      screen.queryByRole("region", { name: /a change waiting for you/i }),
+    ).toBeNull();
+    // Still ten. A change read and turned down is not a change made.
+    await screen.findByText(/10 changes left on this document/i);
+  });
+});

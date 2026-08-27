@@ -595,6 +595,75 @@ h1 {
 .left-today i { width: 8px; height: 8px; margin-top: 4px; background: var(--kept); font-style: normal; display: inline-block; flex: none; }
 .left-today b { color: var(--ink-2); font-weight: 500; }
 
+/* The change that is waiting.
+   Takes the field's place rather than sitting beside it: while there is an
+   undecided change on screen there is one question, and it is this one.
+   No red-and-green diff here -- on this page red is the damage and green is
+   what was recovered, and a proposal is neither. The current text is set
+   plainly and the proposed text carries the institution's own blue, which is
+   what every other "this is the change" mark on the page already uses. */
+.review { display: flex; flex-direction: column; gap: 12px; }
+.review__lede { margin: 0; font-size: var(--t2); color: var(--ink-2); line-height: 1.55; }
+.review__lede b { color: var(--ink); font-weight: 640; }
+.review__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+/* Anything that scrolls gets a tab stop. */
+.review__list:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.review__item { border-top: 1px solid var(--rule); padding-top: 10px; }
+.review__item:first-child { border-top: 0; padding-top: 0; }
+.review__why {
+  margin: 0 0 8px;
+  font-family: var(--mono);
+  font-size: var(--t1);
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+.review__sides { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.review__side { margin: 0; min-width: 0; }
+.review__side figcaption {
+  font-family: var(--mono);
+  font-size: var(--t1);
+  color: var(--ink-3);
+  margin-bottom: 4px;
+}
+.sheet--inline {
+  border: 1px solid var(--rule);
+  background: var(--sheet);
+  padding: 8px 10px;
+  font-size: var(--t2);
+  line-height: 1.5;
+  overflow-x: auto;
+}
+.review__side--after .sheet--inline { border-color: var(--post-blue); }
+.review__side--after figcaption { color: var(--post-blue); }
+.review__decide { display: flex; align-items: center; gap: 10px; }
+.discard {
+  font: inherit;
+  font-size: var(--t2);
+  font-weight: 640;
+  background: none;
+  color: var(--ink-2);
+  border: 2px solid var(--rule-firm);
+  padding: 7px 14px;
+  cursor: pointer;
+}
+.discard:hover:not(:disabled) { border-color: var(--ink); color: var(--ink); }
+.discard:disabled { color: var(--ink-3); border-color: var(--rule); cursor: default; }
+
+/* One column under the width where two panels stop being readable side by
+   side -- a diff squeezed to nothing is not a diff. */
+@media (max-width: 900px) {
+  .review__sides { grid-template-columns: 1fr; }
+}
+
 /* Where the counter cannot be opened, one sentence stands in place of the
    field. A step this copy of the page cannot take is never drawn as a button. */
 .shut { margin: 0; font-size: var(--t2); color: var(--ink-2); line-height: 1.55; }

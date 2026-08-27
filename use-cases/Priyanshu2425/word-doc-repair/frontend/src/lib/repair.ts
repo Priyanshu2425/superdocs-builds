@@ -202,6 +202,28 @@ export interface RevertResult extends CounterOpen {
   preview_html: string;
 }
 
+/** One change SuperDocs wants to make, as it describes it. `old_html` and
+ *  `new_html` are the two sides of the sheet; `ai_explanation` is the reason,
+ *  which the API documentation is explicit should be shown to the person
+ *  rather than kept. `operation` says which of the two sides exists: a
+ *  `create` has no `old_html`, a `delete` has no `new_html`. */
+export interface ProposedChange {
+  change_id: string;
+  operation: "edit" | "create" | "delete";
+  chunk_id: string | null;
+  old_html: string | null;
+  new_html: string | null;
+  ai_explanation: string;
+}
+
+/** A change waiting on a decision. Present on every counter payload, `null`
+ *  when nothing is waiting — so coming back to the page finds the review
+ *  rather than losing it. */
+export interface PendingReview {
+  asked: string;
+  changes: ProposedChange[];
+}
+
 /** The manifest at the end of a turn's SSE stream — the same shape a repair
  *  ends on, because streaming a change to a document is the same situation as
  *  streaming the recovery of one. */
@@ -222,6 +244,10 @@ export interface TurnResult {
    *  toggle, never the change -- in which case the sheet should stay on
    *  `report.preview_html` rather than go blank. */
   preview_html: string;
+  /** Set when the turn proposed instead of applying. `applied` is false and
+   *  the document is untouched until `decideTurn` answers. */
+  proposed?: boolean;
+  pending: PendingReview | null;
 }
 
 /** `GET /api/style/{token}/session` — session state for reopening the counter
@@ -237,6 +263,7 @@ export interface CounterState {
    *  session has no accepted turns yet, meaning `report.preview_html` is
    *  still the right thing on screen. */
   preview_html: string;
+  pending: PendingReview | null;
 }
 
 function counterError(detail: string, fallback: string): RepairError {
@@ -301,6 +328,45 @@ export async function sendTurn(
     throw counterError(
       await readJsonDetail(res),
       "That change could not be sent just now. Nothing was changed.",
+    );
+  }
+  const result = await readStream(res, onStage);
+  if (!result) {
+    throw new RepairError(
+      "The connection dropped part-way through. A change that was already applied is not lost — it will show on the ledger once the counter can be reached again.",
+    );
+  }
+  return result as unknown as TurnResult;
+}
+
+/** Answer the change that is waiting. Streamed like the turn it finishes,
+ *  because approving is not instant: SuperDocs resumes the job, applies the
+ *  change, and only then is there a file to export.
+ *
+ *  Discarding is free — it spends no turn here and is not billed there. */
+export async function decideTurn(
+  token: string,
+  approved: boolean,
+  onStage: (stage: Stage) => void,
+  signal?: AbortSignal,
+): Promise<TurnResult> {
+  let res: Response;
+  try {
+    res = await fetch(`/api/style/${token}/approve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approved }),
+      signal,
+    });
+  } catch {
+    throw new RepairError(
+      "The connection dropped before that decision could be sent. Your document is unchanged.",
+    );
+  }
+  if (!res.ok || !res.body) {
+    throw counterError(
+      await readJsonDetail(res),
+      "That decision could not be sent just now. Your document is unchanged.",
     );
   }
   const result = await readStream(res, onStage);

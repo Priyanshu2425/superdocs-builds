@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   RepairError,
+  decideTurn,
   openCounter,
   revertTurn,
   sendTurn,
   styleToken,
+  type PendingReview,
   type Receipt,
   type Report as ReportT,
   type Stage,
@@ -32,6 +34,10 @@ interface SessionView {
   download: string | null;
   plainDownload: string | null;
   authoredWords: number;
+  /** A change SuperDocs wants to make, waiting on this person. While this is
+   *  set the document is untouched and the field is put away: there is one
+   *  question on the screen and it is this one. */
+  pending: PendingReview | null;
 }
 
 function plural(n: number, word: string): string {
@@ -54,6 +60,101 @@ function entryCopy(r: Receipt): { label: string | null; body: string } {
   // own reason in one sentence (B21). The label is all this adds.
   if (r.applied) return { label: null, body: r.note };
   return { label: "Not applied", body: r.note };
+}
+
+/** The change that is waiting, and the two answers to it.
+ *
+ *  The API documentation calls this the simplest of the three review
+ *  patterns — a card per change, the two sides side by side, the decision
+ *  underneath — and it is the one that fits here: the sheet stays as it is
+ *  until the person says otherwise, so nothing on this screen has to be
+ *  undone if they say no.
+ *
+ *  `ai_explanation` leads, because the reason is the part they can judge.
+ *  The markup is SuperDocs' own and was scrubbed server-side on the same
+ *  path the sheet takes.
+ */
+function Review({
+  pending,
+  busy,
+  onDecide,
+}: {
+  pending: PendingReview;
+  busy: boolean;
+  onDecide: (approved: boolean) => void;
+}) {
+  const n = pending.changes.length;
+  return (
+    <section className="ask review" aria-label="A change waiting for you">
+      <p className="review__lede">
+        <b>
+          SuperDocs would make {plural(n, "change")} for “{pending.asked}”.
+        </b>{" "}
+        Nothing has changed yet. Your document stays exactly as it is unless
+        you keep this.
+      </p>
+
+      {/* It scrolls when there are several changes, so it takes a tab stop:
+          a keyboard cannot reach what it cannot focus. */}
+      <ol className="review__list" tabIndex={0}>
+        {pending.changes.map((c) => (
+          <li key={c.change_id} className="review__item">
+            <p className="review__why">{c.ai_explanation}</p>
+            <div className="review__sides">
+              {c.old_html !== null && (
+                <figure className="review__side review__side--before">
+                  <figcaption>
+                    {c.operation === "delete" ? "Would be removed" : "Now"}
+                  </figcaption>
+                  <div
+                    className="sheet sheet--inline"
+                    dangerouslySetInnerHTML={{ __html: c.old_html }}
+                  />
+                </figure>
+              )}
+              {c.new_html !== null && (
+                <figure className="review__side review__side--after">
+                  <figcaption>
+                    {c.operation === "create" ? "Would be added" : "Would become"}
+                  </figcaption>
+                  <div
+                    className="sheet sheet--inline"
+                    dangerouslySetInnerHTML={{ __html: c.new_html }}
+                  />
+                </figure>
+              )}
+            </div>
+          </li>
+        ))}
+      </ol>
+
+      <div className="review__decide">
+        <button
+          className="send"
+          type="button"
+          disabled={busy}
+          onClick={() => onDecide(true)}
+        >
+          Keep {n === 1 ? "this change" : "these changes"}
+        </button>
+        <button
+          className="discard"
+          type="button"
+          disabled={busy}
+          onClick={() => onDecide(false)}
+        >
+          Discard
+        </button>
+      </div>
+      <p className="left-today">
+        <i aria-hidden="true" />
+        <span>
+          Discarding costs you nothing — it does not use one of this
+          document’s changes.
+        </span>
+      </p>
+    </section>
+  );
 }
 
 export function Counter({
@@ -99,6 +200,7 @@ export function Counter({
           download: report.download,
           plainDownload: report.plain_download,
           authoredWords: 0,
+          pending: null,
         });
       })
       .catch((e) => {
@@ -131,8 +233,12 @@ export function Counter({
         download: result.download,
         plainDownload: result.plain_download,
         authoredWords: result.authored_words,
+        pending: result.pending,
       });
-      setMessage("");
+      // The field is cleared only once the change has actually been decided.
+      // A proposal on screen with an empty box would have thrown away what
+      // they wrote before they had chosen whether to keep it.
+      if (!result.pending) setMessage("");
       // Empty when the export could not be rendered -- an unreadable preview
       // costs the toggle, not the change, so the sheet just stays on
       // whatever it was already showing rather than going blank.
@@ -150,6 +256,44 @@ export function Counter({
     }
   }, [token, sending, message]);
 
+  /** Answer the change that is waiting. Both answers are one call; the
+   *  difference is a boolean, because denying is the same endpoint. */
+  const decide = useCallback(
+    async (approved: boolean) => {
+      if (!token || sending) return;
+      setSending(true);
+      setStages([]);
+      setProblem(null);
+      try {
+        const result = await decideTurn(token, approved, (s) =>
+          setStages((prev) => [...prev, s]),
+        );
+        setSession({
+          turnsLeft: result.turns_left,
+          turnsCap: result.turns_cap,
+          receipts: result.receipts,
+          download: result.download,
+          plainDownload: result.plain_download,
+          authoredWords: result.authored_words,
+          pending: result.pending,
+        });
+        setMessage("");
+        if (result.preview_html) setAfterHtml(result.preview_html);
+        setSide("after");
+      } catch (e) {
+        setProblem(
+          e instanceof RepairError
+            ? e.message
+            : "Something went wrong before that decision could be sent. Your document is unchanged.",
+        );
+      } finally {
+        setSending(false);
+        setStages([]);
+      }
+    },
+    [token, sending],
+  );
+
   const putItBack = useCallback(async () => {
     if (!token || reverting || sending) return;
     setReverting(true);
@@ -163,6 +307,7 @@ export function Counter({
         download: report.download,
         plainDownload: report.plain_download,
         authoredWords: session?.authoredWords ?? 0,
+        pending: null,
       });
       setMessage(result.compose_text ?? "");
       // Non-empty -- the version reverted onto still has a turn's changes on
@@ -357,7 +502,13 @@ export function Counter({
               </p>
             ) : null}
 
-            {session.turnsLeft !== null && session.turnsLeft <= 0 ? (
+            {session.pending ? (
+              <Review
+                pending={session.pending}
+                busy={sending}
+                onDecide={(approved) => void decide(approved)}
+              />
+            ) : session.turnsLeft !== null && session.turnsLeft <= 0 ? (
               <p className="shut" style={{ padding: "13px 18px" }}>
                 That is the tenth change on this document, which is as many as one recovery
                 carries.

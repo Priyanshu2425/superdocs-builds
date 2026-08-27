@@ -248,20 +248,38 @@ directory was a race the moment two recoveries overlapped.*
 
 Recorded here so they are decisions and not gaps.
 
-**D1 · Three of the four contract calls.** Section 07 of the brief names a
-four-call minimum: upload, chat, approve, export. This build makes upload, chat
-and export. The documented approve endpoint
-(`POST /v1/chat/{session_id}/approve`) exists only on the asynchronous
-`chat_async` path, reached with `approval_mode='ask_every_time'`; the
-synchronous `/v1/chat` used here applies its change inline. The decision taken
-was to trust the model on a formatting-only instruction and verify the result
-instead — **B20** does after the fact what approval would have done before it,
-on the artifact that actually ships. See BUG-097.
+**D1 · All four contract calls — reversed 2026-08-27.** This entry used to
+read *"three of the four contract calls"*, and the reason given was that the
+approve endpoint exists only on the asynchronous `chat_async` path, so adding
+it would mean moving off the synchronous endpoint purely to have something to
+approve.
+
+That reason did not survive being checked. The counter was **already** on
+`/v1/chat/async` — it simply sent no `approval_mode` and cancelled the job if
+the pause ever appeared. The cost the departure was justified by had already
+been paid, and what was left was one field and one branch.
+
+The build now makes upload, chat, approve and export. The approval is a person:
+`approval_mode='ask_every_time'` stops the job at `awaiting_approval`, the page
+shows each proposed change with its `old_html`, its `new_html` and the
+`ai_explanation` the API documentation says to show, and nothing is applied
+until they keep it. Discarding is free at the counter and is not billed by the
+platform.
+
+The automatic pass inside `/api/recover` is deliberately unchanged and stays
+synchronous. Its instruction is machine-authored and formatting-only, on a
+document the person dropped a moment ago and has no basis on which to judge —
+and the documentation's own recommendation is to default to auto-apply and make
+review the opt-in. **B20** still guards that road's output after the fact. The
+line is the same one B20″ draws: the model acting with nobody watching gets a
+guard, the model acting because somebody asked gets their decision.
+
+See BUG-097.
 
 ## Known open, and not to be mistaken for baseline
 
-**O1 · BUG-095 — mostly resolved 2026-08-27, and its cause was not what this
-entry said.** `npm test` now passes 47 of 56.
+**O1 · BUG-095 — resolved 2026-08-27, and its cause was not what this entry
+said.** `npm test` passes 62 of 62, and BUG-095 is closed on the ledger.
 
 The diagnosis here was wrong, and wrong in a way worth keeping on the record.
 It read the 42 failures as `Report.tsx` being written for an older payload

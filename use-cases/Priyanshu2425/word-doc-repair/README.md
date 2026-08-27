@@ -27,7 +27,8 @@ styling.
    could not be, and the rebuilt document itself rendered on the page before you
    decide whether to download it.
 5. **Let you set it your way.** The file arrives already styled — but if that is
-   not how you would have set it, say so in your own words and watch it change.
+   not how you would have set it, say so in your own words. SuperDocs proposes
+   the change and stops; you read it and decide whether it lands.
 
 ![The counter: the document on the left, one field and a ledger on the right](screenshot-counter.png)
 
@@ -37,8 +38,13 @@ A door beside the download, opening a conversation with SuperDocs about the
 document it just styled. Ask for smaller headings, tighter spacing, hairline
 table rules; the document answers and the sheet updates.
 
-Three things it does that a chat window normally does not:
+Four things it does that a chat window normally does not:
 
+- **It asks before it changes anything.** SuperDocs proposes; the page shows you
+  what it would change, the text as it stands beside the text it would become,
+  and the reason SuperDocs gave for each one. Your document is untouched until
+  you keep it. Discarding costs you nothing — not one of this document's
+  changes, and nothing on our side either.
 - **It shows the change, not a claim about it.** After a turn the page renders
   SuperDocs' own markup, so a formatting change is visible rather than asserted.
   A toggle puts *as it came back* beside *with your changes*.
@@ -122,11 +128,11 @@ PYTHONPATH=backend ./.venv/bin/python -m docrepair.measure
 
 ## Tests
 
-**169 Python tests and 57 on the page. No key, no network.**
+**183 Python tests and 62 on the page. No key, no network.**
 
 ```bash
-./.venv/bin/python -m pytest tests/ -q      # 169
-cd frontend && npm install && npx vitest run # 57
+./.venv/bin/python -m pytest tests/ -q      # 183
+cd frontend && npm install && npx vitest run # 62
 ```
 
 The offline claim is checked the strong way rather than the convenient one: the
@@ -167,7 +173,12 @@ turn must turn its test red.
   undeclared. An undeclared part makes Word call the whole repaired document
   corrupt, and handing somebody a second broken file is worse than handing them
   one picture short with a line saying so.
-- **Three of the four contract calls.** No approve step; see D1 in
+- **All four contract calls, and the approve step is a person.** At the counter
+  SuperDocs proposes and stops: you read what it would change and why, and
+  nothing reaches your document until you keep it. Discarding costs you nothing.
+  The automatic pass on the way in still applies its own formatting-only
+  instruction without asking — you have no basis to judge a change to a file you
+  dropped a second ago, and it guards its own output instead. See D1 in
   [BASELINE.md](BASELINE.md).
 - **The counter refuses nothing for what you ask it.** The automatic pass still
   guards its own output — that is where the model acts with nobody watching. At

@@ -45,6 +45,12 @@ class FakeTurn:
     turn_index: int = 1
     reconciled: bool = False
     stages: list = field(default_factory=list)
+    # Mirrors `superdocs_client.Turn`. A fake that accepts fewer fields than
+    # the thing it stands in for is how BUG-015 happened: the tests stayed
+    # green against a shape the real client had stopped producing.
+    proposed: bool = False
+    pending: list = field(default_factory=list)
+    job_id: str = ""
 
 
 @dataclass
@@ -63,16 +69,19 @@ class FakeClient:
     sent, so a pre-flight refusal can be proven to have sent nothing."""
 
     def __init__(self, *, allowance_known=True, allowance_remaining=99,
-                turn_result=None, revert_result=None, document_html=""):
+                turn_result=None, revert_result=None, document_html="",
+                decide_result=None):
         self.allowance_known = allowance_known
         self.allowance_remaining = allowance_remaining
         self._turn_result = turn_result
         self._revert_result = revert_result
+        self._decide_result = decide_result
         self._document_html = document_html
         self.allowance_calls = 0
         self.open_calls: list[tuple] = []
         self.turn_calls: list[str] = []
         self.revert_calls: list[int] = []
+        self.decide_calls: list[tuple] = []
 
     # -- the automatic pass's interface (see superdocs_client.SuperDocsClient.style)
     def style(self, sent: bytes, filename: str = "recovered.docx", on_progress=None):
@@ -104,6 +113,24 @@ class FakeClient:
         if callable(self._turn_result):
             return self._turn_result(message, sent, authorised)
         return self._turn_result or FakeTurn(output=sent + b"!" + message.encode())
+
+    def decide(self, session_id, job_id, changes, approved, *, sent,
+               authorised, on_progress=None) -> FakeTurn:
+        self.decide_calls.append((job_id, [c.get("change_id") for c in changes],
+                                  approved))
+        if on_progress:
+            on_progress("Styling",
+                        "Applying your change…" if approved
+                        else "Discarding that change…")
+        if callable(self._decide_result):
+            return self._decide_result(job_id, changes, approved)
+        if self._decide_result is not None:
+            return self._decide_result
+        if not approved:
+            return FakeTurn(ok=False, output=b"",
+                            note="Nothing was changed. That costs you nothing "
+                                 "and does not use one of your changes.")
+        return FakeTurn(output=sent + b"!approved")
 
     def revert(self, session_id, turn_index) -> FakeReverted:
         self.revert_calls.append(turn_index)
@@ -468,3 +495,155 @@ def test_a_preview_that_cannot_be_read_costs_the_toggle_and_not_the_turn(
     assert final["applied"] is True, "the turn still landed"
     assert final["preview_html"] == ""
     assert final["download"], "and the file is still there to download"
+
+
+# -- the review gate -------------------------------------------------------------
+#
+# BUG-097. A turn proposes; the person decides; only then does anything land.
+
+
+_PROPOSED = [
+    {"change_id": "ch_1", "operation": "edit", "chunk_id": "c-1",
+     "old_html": "<h1>Notes</h1>", "new_html": "<h2>Notes</h2>",
+     "ai_explanation": "Made the heading one size smaller."},
+]
+
+
+def _proposing(message, sent, authorised):
+    return FakeTurn(ok=False, output=b"", proposed=True, pending=_PROPOSED,
+                    job_id="job-9",
+                    note="SuperDocs proposes 1 change. Nothing has changed "
+                         "yet — read it and decide.")
+
+
+def _at_a_proposal(client, monkeypatch):
+    """A counter open on a document with one change waiting to be decided."""
+    payload, fake = _recover(client, monkeypatch, turn_result=_proposing)
+    token = payload["token"]
+    client.post(f"/api/style/{token}/open")
+    events = _sse_events(client.post(f"/api/style/{token}/turn",
+                                     json={"message": "Make the headings smaller"}))
+    return token, fake, events[-1]
+
+
+def test_a_proposed_turn_changes_nothing_and_costs_nothing(client, monkeypatch):
+    token, fake, final = _at_a_proposal(client, monkeypatch)
+
+    assert final["proposed"] is True
+    assert final["applied"] is False
+    # Not yet counted: reading a proposal and saying no must be free.
+    assert final["turns_left"] == web.TURNS_CAP
+    # No receipt yet either -- nothing has happened to record.
+    assert final["receipts"] == []
+    # The download still points at the untouched rebuild.
+    assert final["download"] is None or final["download"] == final["plain_download"]
+
+
+def test_the_page_is_told_what_would_change_and_why(client, monkeypatch):
+    token, _, final = _at_a_proposal(client, monkeypatch)
+
+    pending = final["pending"]
+    assert pending["asked"] == "Make the headings smaller"
+    change = pending["changes"][0]
+    assert change["old_html"] == "<h1>Notes</h1>"
+    assert change["new_html"] == "<h2>Notes</h2>"
+    # The docs are explicit that this sentence is shown to the person.
+    assert change["ai_explanation"]
+    # The job id is ours, not theirs.
+    assert "job_id" not in pending
+
+
+def test_reopening_the_counter_finds_the_review_rather_than_losing_it(
+        client, monkeypatch):
+    token, _, _ = _at_a_proposal(client, monkeypatch)
+
+    state = client.get(f"/api/style/{token}/session").json()
+
+    assert state["pending"]["changes"][0]["change_id"] == "ch_1"
+    assert state["turns_left"] == web.TURNS_CAP
+
+
+def test_approving_applies_it_counts_it_and_repoints_the_download(
+        client, monkeypatch):
+    token, fake, final = _at_a_proposal(client, monkeypatch)
+    plain = final["plain_download"]
+
+    done = _sse_events(client.post(f"/api/style/{token}/approve",
+                                   json={"approved": True}))[-1]
+
+    assert fake.decide_calls == [("job-9", ["ch_1"], True)]
+    assert done["applied"] is True
+    assert done["turns_left"] == web.TURNS_CAP - 1
+    assert done["download"] and done["download"] != plain
+    assert done["pending"] is None
+    assert [r["applied"] for r in done["receipts"]] == [True]
+
+
+def test_discarding_leaves_the_document_alone_and_costs_no_turn(
+        client, monkeypatch):
+    token, fake, final = _at_a_proposal(client, monkeypatch)
+    plain = final["plain_download"]
+
+    done = _sse_events(client.post(f"/api/style/{token}/approve",
+                                   json={"approved": False}))[-1]
+
+    assert fake.decide_calls == [("job-9", ["ch_1"], False)]
+    assert done["applied"] is False
+    assert done["turns_left"] == web.TURNS_CAP, "a discarded change must be free"
+    assert done["pending"] is None
+    assert done["download"] is None or done["download"] == plain
+    # It still leaves a trace: a decision the person made is theirs to see.
+    assert [r["applied"] for r in done["receipts"]] == [False]
+
+
+def test_deciding_when_nothing_is_waiting_is_refused(client, monkeypatch):
+    payload, _ = _recover(client, monkeypatch)
+    token = payload["token"]
+    client.post(f"/api/style/{token}/open")
+
+    res = client.post(f"/api/style/{token}/approve", json={"approved": True})
+
+    assert res.status_code == 409
+
+
+def test_a_review_in_the_way_is_said_rather_than_sent_and_failed(
+        client, monkeypatch):
+    """SuperDocs answers a revert with 409 while a review is open. The page
+    says so instead of firing a call it knows will fail."""
+    token, fake, _ = _at_a_proposal(client, monkeypatch)
+
+    res = client.post(f"/api/style/{token}/revert").json()
+
+    assert res["ok"] is False
+    assert fake.revert_calls == []
+    assert "decide" in res["note"].lower()
+
+
+def test_proposed_markup_is_scrubbed_before_it_reaches_the_page(client, monkeypatch):
+    """`old_html`/`new_html` are SuperDocs' markup and are rendered as markup,
+    so they take the same scrubbing the sheet does rather than being trusted
+    for coming from the API."""
+    hostile = [{
+        "change_id": "ch_x", "operation": "edit", "chunk_id": "c-1",
+        "old_html": "<p>before</p><script>alert(1)</script>",
+        "new_html": "<p onclick=\"steal()\">after</p>",
+        "ai_explanation": "Tidied it.",
+    }]
+
+    def proposing(message, sent, authorised):
+        return FakeTurn(ok=False, output=b"", proposed=True, pending=hostile,
+                        job_id="job-x", note="SuperDocs proposes 1 change.")
+
+    payload, _ = _recover(client, monkeypatch, turn_result=proposing)
+    token = payload["token"]
+    client.post(f"/api/style/{token}/open")
+    final = _sse_events(client.post(f"/api/style/{token}/turn",
+                                    json={"message": "Tidy it"}))[-1]
+
+    change = final["pending"]["changes"][0]
+    assert "<script" not in (change["old_html"] or "")
+    assert "alert(1)" not in (change["old_html"] or "")
+    assert "onclick" not in (change["new_html"] or "")
+    # The words themselves survive -- scrubbing must not eat the diff.
+    assert "before" in (change["old_html"] or "")
+    assert "after" in (change["new_html"] or "")

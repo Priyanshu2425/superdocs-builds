@@ -300,10 +300,14 @@ done</pre>
 
 <h2 id="superdocs"><span class="n">4</span> &nbsp;The SuperDocs path — the four calls</h2>
 <p class="lead">The card is banded <b>API + export</b>. The brief's minimum contract is upload · chat · approve ·
-export. This build makes three of them — upload · chat · export — with a balance read in front and a
-content check behind. The synchronous <code>/v1/chat</code> applies its edit inline, and the documented
-approve endpoint exists only on the asynchronous path; the check behind the call does the work approval
-before it would have done, on the file that actually ships. See D1 in BASELINE.md.</p>
+export, and this build makes all four — with a balance read in front and a content check behind.
+There are two roads and they are not the same shape. The <b>automatic pass</b> on the way in is
+synchronous: a machine-authored, formatting-only instruction on a file the person dropped a second ago,
+applied inline and checked afterwards by the content guard. The <b>counter</b> is asynchronous with
+<code>approval_mode='ask_every_time'</code>: SuperDocs proposes, the job stops at
+<code>awaiting_approval</code>, the page shows each change with the reason SuperDocs gave for it, and
+<code>POST /v1/chat/{session_id}/approve</code> carries the person's answer. Nothing lands until they
+say so, and discarding costs them nothing. See D1 in BASELINE.md.</p>
 
 <figure>
 <div class="diagram">
@@ -495,9 +499,9 @@ exactly one rule: <b>the person keeps the file they already had.</b></p>
 <tr><td><b>The client is vendored into both builds</b></td>
     <td>Each build stands alone in the public repository, which is what the contribution rules ask for.</td>
     <td>Real drift, twice. A fix landed in one copy and not the other (BUG-015), then an improvement did (BUG-056). Paid for with a guard that fails the build when the two diverge.</td></tr>
-<tr><td><b>Formatting changes are approved automatically</b></td>
-    <td>A consumer is not asked to adjudicate a diff they have no way to judge.</td>
-    <td>It is a gate that does not gate. Paid for by the content guard, which is the check that actually protects them — and by saying it plainly on the page rather than implying a human reviewed it.</td></tr>
+<tr><td><b>The automatic pass approves its own formatting change; the counter does not</b></td>
+    <td>A consumer is not asked to adjudicate a diff they have no way to judge on a file they have not read yet — which is also the documentation's own recommended default. An instruction they wrote themselves is the opposite case, and stops for them.</td>
+    <td>Two behaviours where a reader might expect one, so both are stated rather than implied. The automatic road is still covered by the content guard; the counter is covered by the person.</td></tr>
 <tr><td><b>Progress is streamed, not polled</b></td>
     <td>Stage lines appear as they happen, over one connection.</td>
     <td>A dropped connection loses the run. Handled: the page says so, and says the original was never changed.</td></tr>

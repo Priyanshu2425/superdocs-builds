@@ -27,18 +27,33 @@ The call sequence, against the documented endpoints:
 
 On the approval step
 --------------------
-The task brief names a four-call minimum contract: upload, chat, approve,
-export. This build makes three of them, deliberately and on the product owner's
-instruction: the synchronous `/v1/chat` endpoint applies its change inline, and
-the documented approval endpoint (`POST /v1/chat/{session_id}/approve`) exists
-only on the asynchronous `chat_async` path, reached by setting
-`approval_mode='ask_every_time'` and polling to `awaiting_approval`. Adding it
-would mean moving to the async flow purely to have something to approve. The
-decision recorded for this build is to trust the model on a formatting-only
-instruction and to verify the *result* instead — see `_why_not_acceptable`,
-which refuses a styled file that came back with fewer pictures or different
-words than the one that was sent. Verification after the fact is doing the work
-approval-before-the-fact would have done, on the thing that actually ships.
+The brief names a four-call minimum contract: upload, chat, approve, export.
+All four are made -- but on the road where a person is actually deciding.
+
+There are two roads through this module and they are not the same shape:
+
+  * `style()`, the automatic pass inside `/api/recover`. A machine-authored,
+    formatting-only instruction on a document the person dropped a moment ago.
+    They have no basis on which to judge it, and the docs' own recommendation
+    is to default to auto-apply and make review the opt-in
+    (guides/human-in-the-loop, "Recommended UX pattern"). This road stays
+    synchronous and keeps `_why_not_acceptable` -- a styled file that comes
+    back with fewer pictures or different words is refused and the plain
+    rebuild ships with the reason said out loud.
+
+  * `turn()` / `decide()`, the counter. The person wrote the instruction, so
+    they are the only one who can say whether the result is what they meant.
+    `approval_mode='ask_every_time'` on `/v1/chat/async` makes the job pause at
+    `awaiting_approval` carrying its proposed changes; `decide()` answers with
+    `POST /v1/chat/{session_id}/approve`. Nothing is applied until they say so,
+    and denying costs nothing -- the platform does not bill a denied
+    review-mode change.
+
+This reverses the decision recorded here until 2026-08-27, which was that
+adding approve "would mean moving to the async flow purely to have something to
+approve". The counter was already on `/v1/chat/async`; it simply sent no
+`approval_mode` and cancelled the job if the pause ever appeared. The cost that
+argument treated as prohibitive had already been paid. See BUG-097.
 
 Prompting for styling
 ---------------------
@@ -162,11 +177,69 @@ class Turn:
     turn_index: int | None = None    # of the user message, for a later revert
     reconciled: bool = False         # True when recovered from a timeout rather than a clean reply
     stages: list = field(default_factory=list)
+    #: Set when the job paused for review instead of applying. `pending` holds
+    #: the proposed changes exactly as SuperDocs described them -- `old_html`,
+    #: `new_html` and `ai_explanation` per entry -- and `job_id` is what
+    #: `decide()` needs to answer. `ok` stays False: nothing has landed.
+    proposed: bool = False
+    pending: list = field(default_factory=list)
+    job_id: str = ""
     # No operation count and no allowance here. The counter does not report
     # what it costs us: somebody whose file broke this morning did not arrive
     # with an account, and a number describing our metering is not something
     # they can act on. The allowance is still read before anything is sent
     # (B22) -- it decides whether to send, and says nothing further.
+
+
+def pending_changes(job_body: dict) -> list[dict]:
+    """Read the proposed changes off a paused job, whatever shape they arrive in.
+
+    Two shapes exist and both are real, which is trap 1 on the brief's own
+    list:
+
+      * `GET /v1/jobs/{id}` returns `metadata.pending_changes` as a plain LIST
+        of change dicts.
+      * The same batch delivered as a `proposed_change_batch` event carries an
+        envelope whose `content` is a JSON-encoded STRING needing a second
+        parse. The docs name missing that second parse as the single most
+        common reason integrators see empty diff cards -- the fields are all
+        there and every one of them reads as undefined.
+
+    Never raises: an unreadable batch is no batch, and the caller treats that
+    the same as a job that proposed nothing.
+    """
+    meta = (job_body or {}).get("metadata") or {}
+    pending = meta.get("pending_changes")
+    if isinstance(pending, list):
+        return list(pending)
+    if pending is None:
+        for event in meta.get("intermediate_responses") or []:
+            if isinstance(event, dict) and event.get("type") == "proposed_change_batch":
+                return parse_proposed_changes(event)
+        return []
+    if isinstance(pending, str):
+        return parse_proposed_changes({"content": pending})
+    return parse_proposed_changes(pending)
+
+
+def parse_proposed_changes(envelope: dict) -> list[dict]:
+    """The second parse. A one-change turn still arrives as a one-element
+    `changes[]`, so this always returns a list and never special-cases the
+    singular form."""
+    import json as _json
+
+    content = (envelope or {}).get("content")
+    if isinstance(content, str):
+        try:
+            content = _json.loads(content)
+        except (ValueError, TypeError):
+            return []
+    if not isinstance(content, dict):
+        return []
+    changes = content.get("changes")
+    if isinstance(changes, list):
+        return [c for c in changes if isinstance(c, dict)]
+    return [content] if content.get("change_id") else []
 
 
 @dataclass
@@ -421,8 +494,13 @@ class SuperDocsClient:
         `/v1/chat` 504s past about 300 seconds, and there is no idempotency
         key on a billable write, so a turn that cannot be confirmed is
         reconciled against the session's own document version rather than
-        ever resent. `approval_mode` is never set -- edits auto-apply, and
-        the job must never reach `awaiting_approval`.
+        ever resent.
+
+        `approval_mode='ask_every_time'`, so this proposes and does not
+        apply. A clean run ends at `awaiting_approval` with `r.proposed` set
+        and the changes on `r.pending`; the person decides, and `decide()`
+        finishes it. `r.ok` is False here on every path -- nothing has landed
+        yet, and the counter must not say it has.
 
         `sent` is the version this turn started from (for the picture
         count) and `authorised` is the authorised word baseline (PRD §3) the
@@ -451,7 +529,10 @@ class SuperDocsClient:
                 f"{BASE}/v1/chat/async",
                 headers=self._headers(),
                 json={"session_id": session_id, "message": _bounded_turn(message),
-                      "response_mode": "compact"},
+                      "response_mode": "compact",
+                      # The person wrote this instruction, so the person
+                      # decides whether the result is what they meant.
+                      "approval_mode": "ask_every_time"},
                 timeout=30,
             )
             resp.raise_for_status()
@@ -459,9 +540,30 @@ class SuperDocsClient:
             if not job_id:
                 raise ValueError("no job id in the response")
 
-            say("Applying your change…")
+            say("Reading your document…")
             body = self._await_job(job_id, say)
             status = (body or {}).get("status")
+
+            if status == "awaiting_approval":
+                r.job_id = job_id
+                r.pending = pending_changes(body)
+                if not r.pending:
+                    # Paused for a review with nothing to review. Nothing has
+                    # been applied, so there is nothing to undo -- but the job
+                    # would block the session until it is answered.
+                    self._deny_quietly(session_id, job_id)
+                    r.note = ("SuperDocs did not propose any change for that, "
+                              "so your document is unchanged. Try saying it "
+                              "another way.")
+                    say(r.note)
+                    return r
+                r.proposed = True
+                count = len(r.pending)
+                noun = "change" if count == 1 else "changes"
+                r.note = (f"SuperDocs proposes {count} {noun}. Nothing has "
+                          f"changed yet — read it and decide.")
+                say(r.note)
+                return r
 
             if status == "completed":
                 result = (body or {}).get("result") or {}
@@ -488,6 +590,123 @@ class SuperDocsClient:
                                  authorised, say)
             return r
 
+    def decide(self, session_id: str, job_id: str, changes: list, approved: bool,
+               *, sent: bytes, authorised, on_progress=None) -> "Turn":
+        """Answer a review, and finish the turn if it was approved.
+
+        `POST /v1/chat/{session_id}/approve` carries the decision. Top-level
+        `approved` is required by the schema even on a batch -- omitting it is
+        a bare 422, and the docs name it as a common trap -- so it is always
+        sent, and every change carries its own copy.
+
+        Approval is asynchronous: the call returns, then the job resumes and
+        applies. Exporting before it settles exports the document without the
+        change in it, so this polls to `completed` first.
+
+        Never raises. Like `turn()`, every path leaves `note` set.
+        """
+        r = Turn()
+        r.job_id = job_id
+
+        def say(msg: str) -> None:
+            r.stages.append(msg)
+            if on_progress:
+                on_progress("Styling", msg)
+
+        before_version = self._version_id(session_id)
+
+        try:
+            say("Applying your change…" if approved else "Discarding that change…")
+            self._answer_review(session_id, job_id, changes, approved)
+
+            if not approved:
+                # Denied changes are not billed, and there is nothing to
+                # export: the document is exactly what it was.
+                self._settle(session_id, job_id, say)
+                r.note = ("Nothing was changed. That costs you nothing and "
+                          "does not use one of your changes.")
+                say(r.note)
+                return r
+
+            body = self._settle(session_id, job_id, say)
+            status = (body or {}).get("status")
+
+            if status == "completed":
+                result = (body or {}).get("result") or {}
+                turn_index = ((body or {}).get("metadata") or {}).get(
+                    "user_turn_index_pre_inserted")
+                self._finish_turn(r, session_id, sent, authorised, say,
+                                  turn_index=turn_index,
+                                  document_changes=result.get("document_changes"))
+                return r
+
+            r.note = ("SuperDocs could not apply that change, so your "
+                      "document is unchanged. You can try again.")
+            say(r.note)
+            return r
+
+        except Exception as exc:  # noqa: BLE001 -- never raise out of a decision
+            log.warning("SuperDocs decision could not be confirmed (%s)", exc)
+            if not approved:
+                # A deny that could not be confirmed changed nothing either
+                # way -- the only risk is a job still holding the session,
+                # and that expires on its own.
+                r.note = ("Nothing was changed. SuperDocs did not confirm "
+                          "that, so give it a moment before sending another "
+                          "change.")
+                say(r.note)
+                return r
+            self._reconcile_turn(r, session_id, before_version, sent,
+                                 authorised, say)
+            return r
+
+    def _answer_review(self, session_id: str, job_id: str, changes: list,
+                       approved: bool) -> None:
+        """The approve call itself. `changes` may be empty -- the top-level
+        decision then stands for the whole batch."""
+        payload: dict = {"job_id": job_id, "approved": bool(approved)}
+        ids = [c.get("change_id") for c in (changes or [])
+               if isinstance(c, dict) and c.get("change_id")]
+        if ids:
+            payload["changes"] = [{"change_id": cid, "approved": bool(approved)}
+                                  for cid in ids]
+        resp = requests.post(
+            f"{BASE}/v1/chat/{session_id}/approve",
+            headers=self._headers(), json=payload, timeout=30,
+        )
+        resp.raise_for_status()
+
+    def _settle(self, session_id: str, job_id: str, say) -> dict | None:
+        """Poll a decided job to a terminal state.
+
+        A denial with no feedback should end the job, but the platform is
+        allowed to come back with a revised proposal instead. Nothing is
+        waiting to answer a second one, so it is denied too -- bounded, so an
+        endlessly re-proposing job stops rather than spinning.
+        """
+        body = self._await_job(job_id, say)
+        rounds = 0
+        while (body or {}).get("status") == "awaiting_approval" and rounds < 2:
+            rounds += 1
+            self._answer_review(session_id, job_id,
+                                pending_changes(body), False)
+            body = self._await_job(job_id, say)
+        return body
+
+    def _deny_quietly(self, session_id: str, job_id: str) -> None:
+        """Clear a review nobody can answer -- a pause that proposed nothing.
+
+        Cancelling is what the docs point at for releasing a session held by a
+        pending approval; already-applied work is kept and pending changes are
+        discarded. Best effort: a job that cannot be cancelled expires on its
+        own within the hour.
+        """
+        try:
+            requests.post(f"{BASE}/v1/jobs/{job_id}/cancel",
+                          headers=self._headers(), timeout=30)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _await_job(self, job_id: str, say) -> dict | None:
         """Poll a chat job to a terminal state, with a small backoff. Emits a
         progress line while it runs (B5: stages are real, not simulated).
@@ -506,15 +725,24 @@ class SuperDocsClient:
             if status in ("completed", "failed", "cancelled"):
                 return body
             if status == "awaiting_approval":
-                # Should never happen -- approval_mode is never set on this
-                # path. Treated as unreadable rather than trusted, and the
-                # job is asked to stop rather than left running unattended.
-                try:
-                    requests.post(f"{BASE}/v1/jobs/{job_id}/cancel",
-                                 headers=self._headers(), timeout=30)
-                except Exception:  # noqa: BLE001
-                    pass
-                raise TimeoutError("job asked for approval unexpectedly")
+                # Two different pauses share this status, and answering the
+                # wrong one is a 409. Branch on `awaiting_kind` first.
+                kind = (body.get("metadata") or {}).get("awaiting_kind")
+                if kind == "continue_prompt":
+                    # A large edit applied what it could and is asking whether
+                    # to keep going. It carries no proposed changes, and is
+                    # resumed with `/v1/chat/{sid}/continue`, not `/approve`.
+                    # This build has no continue flow, so the job is asked to
+                    # stop rather than left running unattended -- and what it
+                    # already applied is kept, which the reconcile path finds.
+                    try:
+                        requests.post(f"{BASE}/v1/jobs/{job_id}/cancel",
+                                      headers=self._headers(), timeout=30)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    raise TimeoutError("job paused to ask about continuing")
+                # A change review. This is the pause the counter asked for.
+                return body
             if time.monotonic() >= deadline:
                 raise TimeoutError("job poll exceeded its budget")
             progress = body.get("progress")

@@ -111,6 +111,13 @@ class StyleSession:
     #: `authored`. No cost on a receipt: what a turn costs us is ours to
     #: know, and is not something the person can act on.
     receipts: list[dict] = field(default_factory=list)
+    #: A review waiting on the person: the job that paused, the changes it
+    #: proposed, and everything the turn had worked out before it stopped, so
+    #: deciding does not have to recompute it. `None` when nothing is
+    #: pending. Kept on the session rather than in the request so that
+    #: reopening the counter finds the review instead of losing it -- the same
+    #: promise the session already makes about receipts.
+    pending: dict | None = None
 
 
 _SESSIONS: dict[str, StyleSession] = {}
@@ -440,6 +447,26 @@ def api_style_open(token: str):
     return _open_session(token)
 
 
+def _safe_change(change: dict) -> dict:
+    """One proposed change, ready to be read.
+
+    `old_html` and `new_html` are SuperDocs' markup and go to the page as
+    markup -- a diff that is not rendered is not a diff. That is third-party
+    HTML reaching `dangerouslySetInnerHTML`, so it is scrubbed here on the
+    same path the sheet already takes (`_safe_html`), rather than trusted
+    because of where it came from. Only the fields the page reads are passed
+    on; the job id stays ours.
+    """
+    return {
+        "change_id": str(change.get("change_id") or ""),
+        "operation": str(change.get("operation") or "edit"),
+        "chunk_id": change.get("chunk_id"),
+        "old_html": _safe_html(change.get("old_html") or "") or None,
+        "new_html": _safe_html(change.get("new_html") or "") or None,
+        "ai_explanation": str(change.get("ai_explanation") or ""),
+    }
+
+
 def _session_payload(token: str, session: StyleSession) -> dict:
     return {
         "turns_left": TURNS_CAP - session.turns_used,
@@ -453,6 +480,12 @@ def _session_payload(token: str, session: StyleSession) -> dict:
         # have run.
         "plain_download": f"/api/download/{token}",
         "authored_words": sum(session.authored.values()),
+        # Only what the person needs to decide: what it would change, and why
+        # SuperDocs says it wants to. Never the job id -- that is ours.
+        "pending": None if not session.pending else {
+            "asked": session.pending["asked"],
+            "changes": [_safe_change(c) for c in session.pending["changes"]],
+        },
     }
 
 
@@ -471,6 +504,46 @@ def api_style_dispose(token: str):
     if not _dispose(token):
         raise HTTPException(404, NOT_HELD)
     return {"disposed": True}
+
+
+def _land(token: str, session: StyleSession, client, turn, *, asked: str,
+          supplied: str, provisional) -> dict:
+    """Record a finished turn and hand back the page's manifest.
+
+    Shared by the turn route -- for a turn that ended without anything to
+    decide -- and by the decision route, since both end the same way once the
+    turn is over.
+    """
+    applied = bool(turn.ok)
+    if applied:
+        session.versions.append(turn.output)
+        _LATEST_DOWNLOAD[token] = _write_version(session, turn.output)
+        # SuperDocs' own HTML first, because it is the only one that carries
+        # formatting: a preview rebuilt from the exported file goes through
+        # `blocks_to_html`, which keeps structure and text and drops every
+        # font size, weight and margin. Ask for smaller headings and that
+        # rebuild comes back identical, so the page shows no change for a
+        # change that really happened. Fall back to the rebuild when the read
+        # fails -- a structural preview beats none.
+        session.preview = (_safe_html(client.document_html(session.session_id))
+                           or _preview_of(turn.output))
+        # The words the person supplied are theirs from here on, and are
+        # counted as theirs in the handover (B27).
+        session.authored = provisional
+
+    session.receipts.append({
+        "asked": asked,
+        "note": turn.note,
+        "turn_index": getattr(turn, "turn_index", None),
+        "applied": applied,
+        "supplied": supplied,
+    })
+
+    return {
+        "applied": applied,
+        "note": turn.note,
+        **_session_payload(token, session),
+    }
 
 
 @app.post("/api/style/{token}/turn")
@@ -544,44 +617,119 @@ def api_style_turn(token: str, body: dict):
             turn = client.turn(session.session_id, message, sent=sent,
                                authorised=authorised, on_progress=say)
 
-            session.turns_used += 1
             session.last_used_at = time.time()
 
-            applied = bool(turn.ok)
-            if applied:
-                session.versions.append(turn.output)
-                _LATEST_DOWNLOAD[token] = _write_version(session, turn.output)
-                # SuperDocs' own HTML first, because it is the only one that
-                # carries formatting: a preview rebuilt from the exported
-                # file goes through `blocks_to_html`, which keeps structure
-                # and text and drops every font size, weight and margin. Ask
-                # for smaller headings and that rebuild comes back identical,
-                # so the page shows no change for a change that really
-                # happened. Fall back to the rebuild when the read fails --
-                # a structural preview beats none.
-                session.preview = (_safe_html(client.document_html(session.session_id))
-                                   or _preview_of(turn.output))
-                # The words the person supplied are theirs from here on, and
-                # are counted as theirs in the handover (B27).
-                session.authored = provisional
+            if turn.proposed:
+                # The job is paused holding the change. Nothing has been
+                # applied and nothing is counted yet: a turn the person
+                # discards costs them nothing, and the platform does not bill
+                # a denied review either.
+                session.pending = {
+                    "job_id": turn.job_id,
+                    "changes": turn.pending,
+                    "asked": message,
+                    "supplied": supplied,
+                    "provisional": provisional,
+                    "sent": sent,
+                    "authorised": authorised,
+                }
+                result["payload"] = {
+                    "applied": False,
+                    "proposed": True,
+                    "note": turn.note,
+                    **_session_payload(token, session),
+                }
+                return
 
-            session.receipts.append({
-                "asked": message,
-                "note": turn.note,
-                "turn_index": getattr(turn, "turn_index", None),
-                "applied": applied,
-                "supplied": supplied,
-            })
+            # Nothing to decide -- the job finished, failed, or was never
+            # answerable. Either way it is over, and it counts.
+            session.turns_used += 1
 
-            result["payload"] = {
-                "applied": applied,
-                "note": turn.note,
-                **_session_payload(token, session),
-            }
+            result["payload"] = _land(token, session, client, turn,
+                                      asked=message, supplied=supplied,
+                                      provisional=provisional)
         except Exception:  # noqa: BLE001 -- never leak a stack trace
             result["payload"] = {
                 "applied": False,
                 "note": "That change could not be completed just now. Your "
+                        "document is unchanged.",
+                **_session_payload(token, session),
+            }
+        finally:
+            q.put(None)
+
+    threading.Thread(target=work, daemon=True).start()
+
+    def stream():
+        while True:
+            item = q.get()
+            if item is None:
+                break
+            yield f"data: {json.dumps(item)}\n\n"
+        yield f"data: {json.dumps({'done': True, **result['payload']})}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.post("/api/style/{token}/approve")
+def api_style_decide(token: str, body: dict):
+    """Answer the review the counter is holding -- the fourth contract call.
+
+    Streamed like the turn it finishes, on the same SSE shape, because
+    approving is not instant: the platform resumes the job and applies the
+    change, and only then is there a file to export.
+    """
+    approved = bool((body or {}).get("approved"))
+
+    _sweep()
+    session = _SESSIONS.get(token)
+    if session is None:
+        raise HTTPException(404, NOT_HELD)
+    pending = session.pending
+    if pending is None:
+        raise HTTPException(409, "There is nothing waiting to be decided.")
+
+    q: queue.Queue = queue.Queue()
+    result: dict = {}
+
+    def work() -> None:
+        try:
+            from docrepair.superdocs_client import SuperDocsClient
+
+            client = SuperDocsClient()
+
+            def say(stage: str, msg: str) -> None:
+                q.put({"stage": stage, "message": msg})
+
+            turn = client.decide(
+                session.session_id, pending["job_id"], pending["changes"],
+                approved, sent=pending["sent"],
+                authorised=pending["authorised"], on_progress=say)
+
+            # Decided either way, so the review is over and the job is no
+            # longer holding the session.
+            session.pending = None
+            session.last_used_at = time.time()
+
+            if approved:
+                # Only an applied change is counted. Reading a proposal and
+                # saying no costs the person nothing -- and costs us nothing
+                # either, since a denied review-mode change is not billed.
+                session.turns_used += 1
+
+            result["payload"] = _land(
+                token, session, client, turn, asked=pending["asked"],
+                supplied=pending["supplied"] if approved else "",
+                provisional=(pending["provisional"] if approved
+                             else session.authored))
+        except Exception:  # noqa: BLE001 -- never leak a stack trace
+            # The review is cleared regardless. Leaving it on screen would
+            # offer a decision that can no longer be made -- the job it
+            # belongs to is answered, expired, or unreachable.
+            session.pending = None
+            result["payload"] = {
+                "applied": False,
+                "note": "That decision could not be completed just now. Your "
                         "document is unchanged.",
                 **_session_payload(token, session),
             }
@@ -609,6 +757,18 @@ def api_style_revert(token: str):
     session = _SESSIONS.get(token)
     if session is None:
         raise HTTPException(404, NOT_HELD)
+
+    if session.pending is not None:
+        # SuperDocs refuses a revert while a review is open (409), and it is
+        # right to: the newest change is not decided yet, so there is no
+        # settled state to go back to. Said rather than sent and failed.
+        return {
+            "ok": False,
+            "note": "There is a change waiting for you. Decide on that one "
+                    "first, then you can put an earlier change back.",
+            "compose_text": "",
+            **_session_payload(token, session),
+        }
 
     applied_receipts = [r for r in session.receipts if r.get("applied")]
     if not applied_receipts or not session.versions:

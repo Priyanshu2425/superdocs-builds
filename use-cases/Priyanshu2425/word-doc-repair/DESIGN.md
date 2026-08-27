@@ -114,6 +114,22 @@ V5 in `docs/style-it-yourself/`; the logic is `docs/PRD-SET-IT-YOUR-WAY.md`.
   anything is sent costs nothing and says so. One made on a file that came back
   wrong was already charged for, and saying "nothing was counted" there would be
   the small lie this build does not tell.
+- **One question at a time, and the field goes away for it.** While a proposed
+  change is on screen the box you type in is not: an instruction stacked on top
+  of an undecided one is how somebody ends up unsure what they agreed to. The
+  review takes the field's place, not a slot beside it.
+- **The proposal is set as the document, not as a diff.** Both sides are
+  rendered — the text as it stands, and the text it would become — because a
+  person judging a formatting change has to see it set, and a marked-up diff of
+  HTML is not something they can read. No red-and-green: here red is damage and
+  green is what was recovered, and a proposal is neither. The current side is
+  plain and the proposed side takes post-blue, which is already the mark for a
+  change that is not a loss.
+- **The reason is shown, not kept.** SuperDocs says why it wants each change,
+  and that sentence goes on the card. It is the only part of a formatting
+  proposal a non-designer can actually weigh.
+- **Saying no is free, and the page says so before they choose.** Not
+  afterwards, when it reads as consolation.
 - **No tape on the counter.** One strip at the top of the shell, as everywhere
   else. Tape means *in our custody*; the sheet is the contents, not the custody.
 - **Red stays red.** A refusal takes the red mark, because a refusal is a loss of
