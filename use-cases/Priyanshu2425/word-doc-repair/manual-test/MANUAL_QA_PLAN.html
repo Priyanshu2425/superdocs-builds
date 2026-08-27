@@ -80,6 +80,28 @@
   </div>
 </header>
 
+<div class="why" style="border-left:3px solid var(--post-red); padding-left:14px; margin:22px 0">
+  <b>This run predates the current implementation. Re-run required.</b>
+  <p>Recorded <b>2026-08-20</b>. The results below are transcribed from a real run on that date and
+  are <em>left exactly as they were</em> — a dated test record is evidence, and editing it to match
+  later behaviour would make it worth nothing.</p>
+  <p>What has changed since, and which rows it invalidates:</p>
+  <ul>
+    <li><b>A1, A6</b> — “offers a … styling link”. There is no styling link. The pass runs inside the
+    recovery and the handover states what happened to it instead (BUG-097).</li>
+    <li><b>D1, D2, D3</b> — <code>/api/capabilities</code> still exists for machine callers, but its
+    note is reworded and the page no longer asks it; <code>POST /api/style/{token}</code> is now a
+    <em>retry</em> rather than the way styling is reached, and with no key it returns a stated
+    degradation rather than a refusal.</li>
+    <li><b>B5</b> — still the check that matters most, and still needs a human with Word. What is
+    downloaded is now the styled file, with the plain rebuild one link away.</li>
+    <li>Pictures now survive into the rebuild <em>and</em> through the styling pass. No row here
+    tested that, because at the time neither was true (BUG-088, BUG-094).</li>
+  </ul>
+  <p>Automated coverage today is <b>76 offline Python tests</b>. The frontend suite is red on a known
+  payload-contract divergence (BUG-095), not on anything this plan covers.</p>
+</div>
+
 <p class="lead">Automated coverage at the time of this run: <strong>63 offline</strong> Python tests,
 <strong>76</strong> with the web extra installed, <strong>46</strong> frontend tests. This page
 covers what those cannot: whether the downloaded file opens, whether the wait is bearable, and

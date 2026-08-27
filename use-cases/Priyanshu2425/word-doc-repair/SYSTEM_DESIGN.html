@@ -117,7 +117,7 @@
 </nav>
 
 <h2 id="shape"><span class="n">1</span> &nbsp;The shape</h2>
-<p class="lead">One engine, two front doors, and an optional second pass. The engine has no
+<p class="lead">One engine, two front doors, and a styling pass inside the recovery. The engine has no
 dependencies at all — not FastAPI, not an HTTP library, nothing. That is what lets the same code
 answer a web request, a terminal, and a test suite that runs with nothing installed.</p>
 
@@ -160,10 +160,10 @@ answer a web request, a terminal, and a test suite that runs with nothing instal
 
   <!-- second pass -->
   <rect class="box" x="520" y="222" width="196" height="96" rx="2" />
-  <text class="lbl" x="534" y="246">styled_export.py</text>
+  <text class="lbl" x="534" y="246">superdocs_client.py</text>
   <text class="lbl-s" x="534" y="266">allowance → upload → chat</text>
-  <text class="lbl-s" x="534" y="284">→ approve → export → guard</text>
-  <text class="lbl-s" x="534" y="306">optional · never automatic</text>
+  <text class="lbl-s" x="534" y="284">→ export → guard</text>
+  <text class="lbl-s" x="534" y="306">primary · runs every time</text>
 
   <rect class="box" x="520" y="340" width="196" height="44" rx="2" />
   <text class="lbl" x="534" y="360">superdocs_client.py</text>
@@ -189,12 +189,12 @@ answer a web request, a terminal, and a test suite that runs with nothing instal
   </g>
   <text class="lbl-s" x="300" y="200" style="fill: var(--post-red)">every failure here…</text>
   <text class="lbl-s" x="300" y="216" style="fill: var(--post-red)">…degrades to the plain rebuild</text>
-  <text class="lbl-s" x="640" y="196">only if asked</text>
+  <text class="lbl-s" x="640" y="196">every time</text>
 </svg>
 </div>
-<figcaption>The blue path always runs and always produces a file. The grey path is optional, costs
-money, and can fail in six ways — all six end with the person still holding what the blue path gave
-them.</figcaption>
+<figcaption>The blue path always runs and always produces a file. The grey path runs every time too and is
+where the delivered file comes from; it costs money and can fail in six ways — all six end with the
+person still holding what the blue path gave them.</figcaption>
 </figure>
 
 <div class="why">
@@ -299,9 +299,11 @@ done</pre>
 </div>
 
 <h2 id="superdocs"><span class="n">4</span> &nbsp;The SuperDocs path — the four calls</h2>
-<p class="lead">The card is banded <b>API + export</b>. The minimum contract is upload · chat ·
-approve · export, and it runs here as an optional second pass with a balance read in front of it and
-a content check behind it.</p>
+<p class="lead">The card is banded <b>API + export</b>. The brief's minimum contract is upload · chat · approve ·
+export. This build makes three of them — upload · chat · export — with a balance read in front and a
+content check behind. The synchronous <code>/v1/chat</code> applies its edit inline, and the documented
+approve endpoint exists only on the asynchronous path; the check behind the call does the work approval
+before it would have done, on the file that actually ships. See D1 in BASELINE.md.</p>
 
 <figure>
 <div class="diagram">
@@ -378,8 +380,13 @@ exporting before it settles returns the pre-edit document with a 200 and no warn
   <p>The documentation is explicit that SuperDocs takes documents and HTML and that there is
   <em>no endpoint for raw Word XML</em>. Clean HTML built from structure already parsed is both
   supported and lossless in the directions that matter: headings stay headings, tables stay tables.</p>
-  <p>What it costs: pictures do not make the trip. The styled copy carries the recovered text; the
-  plain rebuild is the one with your images in it, and the README says so.</p>
+  <p><b>Corrected 2026-08-26.</b> This section used to record that pictures did not make the trip,
+  because the pass sent HTML and <code>blocks_to_html</code> dropped every image on the way out
+  (BUG-094). The rebuilt <code>.docx</code> is sent now instead: the documented upload extracts
+  images to cloud storage and the export preserves embedded images, so the pictures travel with the
+  file and no separate image call is needed. Verified live — the styled file comes back carrying
+  <code>word/media/image1.png</code> byte-for-byte. The guard behind the call counts them and
+  refuses a styled file that returns with fewer.</p>
 </div>
 
 <h2 id="guard"><span class="n">5</span> &nbsp;The content guard</h2>
@@ -505,7 +512,6 @@ exactly one rule: <b>the person keeps the file they already had.</b></p>
   <li><b>Pictures come back; captions, wrapping and floating positions do not.</b></li>
   <li><b>Footnotes, headers and footers come back as text, not as page furniture.</b></li>
   <li><b>Comments and tracked changes are not recovered.</b></li>
-  <li><b>The styled copy carries text only</b> — no pictures, because the styling pass takes HTML.</li>
   <li><b><code>.doc</code> is not supported.</b> The pre-2007 binary format is not a ZIP at all, and
   is reported as unrepairable rather than silently mangled.</li>
   <li><b>Direct upload only</b>, so the practical ceiling is about 20 MB.</li>

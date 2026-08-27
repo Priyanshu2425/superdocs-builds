@@ -3,30 +3,36 @@
   "filename": "06-not-a-word-file.docx",
   "events": [
     {
-      "stage": "open",
-      "message": "Opening the file…"
+      "stage": "Scanning Headers",
+      "message": "Reading the parts out of the file…"
     },
     {
-      "stage": "open",
-      "message": "The file's internal index was damaged — this is what Word reports as a corrupt document — so the content was read directly from inside it."
-    },
-    {
-      "stage": "open",
-      "message": "No readable parts were found inside the file."
+      "stage": "Reading Body",
+      "message": "No document body could be found."
     }
   ],
   "report": {
     "ok": false,
-    "summary": "This file could not be repaired. No readable parts could be found inside the file. Nothing was invented to fill the gap — if there is another copy, even an older one, that is the better starting point.",
-    "recovered": [],
+    "verdict": "refused",
+    "word_count": 0,
+    "method": "empty",
+    "asides_text": "",
+    "output_path": "",
     "lost": [
-      "no readable parts could be found inside the file"
+      "no readable parts could be found inside the file",
+      "the main document part was not found inside the file, so there is no text to recover"
     ],
-    "counts": {},
-    "structure_preserved": true,
-    "filename": "06-not-a-word-file-repaired.docx",
     "preview_html": "",
+    "structure_preserved": false,
+    "images_recovered": 0,
+    "images_unplaced": 0,
+    "images_lost": [],
+    "tables_recovered": 0,
     "download": null,
-    "style": null
+    "style": null,
+    "styled": false,
+    "styling_note": "",
+    "styling_rejected": false,
+    "plain_download": null
   }
 }

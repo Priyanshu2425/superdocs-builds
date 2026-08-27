@@ -3,34 +3,35 @@
   "filename": "05-missing-document-part.docx",
   "events": [
     {
-      "stage": "open",
-      "message": "Opening the file…"
+      "stage": "Scanning Headers",
+      "message": "Reading the parts out of the file…"
     },
     {
-      "stage": "open",
-      "message": "The container opened cleanly."
-    },
-    {
-      "stage": "inventory",
-      "message": "Found 4 sections inside the document."
-    },
-    {
-      "stage": "inventory",
-      "message": "The main document part is missing and cannot be rebuilt."
+      "stage": "Reading Body",
+      "message": "No document body could be found."
     }
   ],
   "report": {
     "ok": false,
-    "summary": "This file could not be repaired. The main document part is missing entirely, so there is no text to recover. Nothing was invented to fill the gap — if there is another copy, even an older one, that is the better starting point.",
-    "recovered": [],
+    "verdict": "refused",
+    "word_count": 0,
+    "method": "empty",
+    "asides_text": "",
+    "output_path": "",
     "lost": [
-      "the main document part is missing entirely, so there is no text to recover"
+      "the main document part was not found inside the file, so there is no text to recover"
     ],
-    "counts": {},
-    "structure_preserved": true,
-    "filename": "05-missing-document-part-repaired.docx",
     "preview_html": "",
+    "structure_preserved": false,
+    "images_recovered": 0,
+    "images_unplaced": 0,
+    "images_lost": [],
+    "tables_recovered": 0,
     "download": null,
-    "style": null
+    "style": null,
+    "styled": false,
+    "styling_note": "",
+    "styling_rejected": false,
+    "plain_download": null
   }
 }

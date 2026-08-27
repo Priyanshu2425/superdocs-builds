@@ -3,46 +3,43 @@
   "filename": "07-empty-body.docx",
   "events": [
     {
-      "stage": "open",
-      "message": "Opening the file…"
+      "stage": "Scanning Headers",
+      "message": "Reading the parts out of the file…"
     },
     {
-      "stage": "open",
-      "message": "The container opened cleanly."
-    },
-    {
-      "stage": "inventory",
-      "message": "Found 5 sections inside the document."
-    },
-    {
-      "stage": "xml",
+      "stage": "Repairing XML",
       "message": "Checking the document body for damage…"
     },
     {
-      "stage": "xml",
-      "message": "The document body was well-formed."
+      "stage": "Reading Body",
+      "message": "Looking for pictures…"
     },
     {
-      "stage": "read",
-      "message": "Reading headings, paragraphs and tables…"
-    },
-    {
-      "stage": "read",
-      "message": "No readable content was found in the document body."
+      "stage": "Reading Body",
+      "message": "No readable text was found."
     }
   ],
   "report": {
     "ok": false,
-    "summary": "This file could not be repaired. The document body contained no readable text. Nothing was invented to fill the gap — if there is another copy, even an older one, that is the better starting point.",
-    "recovered": [],
+    "verdict": "refused",
+    "word_count": 0,
+    "method": "xml",
+    "asides_text": "",
+    "output_path": "",
     "lost": [
-      "the document body contained no readable text"
+      "no readable text was found in the document body"
     ],
-    "counts": {},
-    "structure_preserved": true,
-    "filename": "07-empty-body-repaired.docx",
     "preview_html": "",
+    "structure_preserved": true,
+    "images_recovered": 0,
+    "images_unplaced": 0,
+    "images_lost": [],
+    "tables_recovered": 0,
     "download": null,
-    "style": null
+    "style": null,
+    "styled": false,
+    "styling_note": "",
+    "styling_rejected": false,
+    "plain_download": null
   }
 }

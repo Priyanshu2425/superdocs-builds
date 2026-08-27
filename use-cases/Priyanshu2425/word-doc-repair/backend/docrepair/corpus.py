@@ -121,8 +121,32 @@ def counts_of(data: bytes) -> dict[str, int]:
     return {
         "tables": body.count(b"<w:tbl>"),
         "rows": body.count(b"<w:tr>") + body.count(b"<w:tr "),
-        "images": len([n for n in names if n.startswith("word/media/")]),
+        # Counted by what the bytes are, not by what the archive lists. A member
+        # under word/media/ that stops before its format's end marker is a grey
+        # box in Word, and counting it as a recovered picture is the harness
+        # agreeing with a claim the file cannot support.
+        "images": _readable_images(names, data),
     }
+
+
+def _readable_images(names: list[str], data: bytes) -> int:
+    from . import media
+
+    total = 0
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            for n in names:
+                if not n.startswith("word/media/"):
+                    continue
+                try:
+                    blob = z.read(n)
+                except (KeyError, zipfile.BadZipFile, RuntimeError, OSError):
+                    continue
+                if media.sniff_ext(blob) and media.is_complete(blob):
+                    total += 1
+    except (zipfile.BadZipFile, OSError, RuntimeError):
+        return 0
+    return total
 
 
 # -- the five base documents -------------------------------------------------

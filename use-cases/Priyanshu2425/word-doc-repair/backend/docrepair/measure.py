@@ -52,7 +52,24 @@ ACCEPTABLE = {
 }
 
 
-def _verdict(ok: bool, word_recall: float, recovered_pictures: int) -> str:
+def _structure_lost(truth: dict, got: dict) -> list[str]:
+    """What a reader would notice going missing, named.
+
+    Kept separate from the verdict so the artifact can say *which* structure was
+    dropped, not only that something was. A count that went up is not loss --
+    the rebuild sets unplaceable pictures at the end under a heading, so it can
+    legitimately carry more headings than the original.
+    """
+    out = []
+    for key in ("images", "tables", "rows"):
+        before, after = truth.get(key, 0), got.get(key, 0)
+        if after < before:
+            out.append(f"{key}: {before} -> {after}")
+    return out
+
+
+def _verdict(ok: bool, word_recall: float, recovered_pictures: int,
+             structure_lost: list[str] | None = None) -> str:
     """One verdict per fixture, with pictures counted as content.
 
     A document whose body was emptied but whose photographs were still in the
@@ -66,7 +83,13 @@ def _verdict(ok: bool, word_recall: float, recovered_pictures: int) -> str:
     if word_recall <= 0.0 and recovered_pictures == 0:
         return EMPTY_SUCCESS
     if word_recall >= 1.0:
-        return FULL
+        # Every word back is not every thing back. This harness used to stop at
+        # the word count, and so scored a rebuild that had dropped every
+        # photograph and every table in the document a complete success --
+        # which is how a regression that lost 100% of images on 100% of files
+        # passed 40/40 on lossless damage without tripping anything. A picture
+        # is content. So is a table.
+        return PARTIAL if structure_lost else FULL
     return PARTIAL
 
 
@@ -92,6 +115,7 @@ def run() -> dict:
         got_counts = corpus.counts_of(result.output) if result.output else {
             "tables": 0, "rows": 0, "images": 0}
         word_recall = corpus.recall(fixture.truth_text, got_text)
+        structure_lost = _structure_lost(fixture.truth_counts, got_counts)
 
         rows.append({
             "fixture": fixture.name,
@@ -99,12 +123,15 @@ def run() -> dict:
             "written_by": fixture.base.written_by,
             "damage": fixture.damage.name,
             "kind": fixture.damage.kind,
-            "verdict": _verdict(result.ok, word_recall, got_counts["images"]),
+            "verdict": _verdict(result.ok, word_recall, got_counts["images"],
+                                structure_lost),
             "ok": result.ok,
             "word_recall": round(word_recall, 4),
             "truth_words": sum(corpus.words(fixture.truth_text).values()),
             "recovered_words": sum(corpus.words(got_text).values()),
             "structure_preserved": result.structure_preserved,
+            "structure_lost": structure_lost,
+            "images_lost": result.images_lost,
             "truth_counts": fixture.truth_counts,
             "recovered_counts": got_counts,
             "lost": result.lost,

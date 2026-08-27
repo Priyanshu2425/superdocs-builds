@@ -1,353 +1,181 @@
-# Salvage — repair my broken Word doc
+# Salvage — repair a broken Word document
 
-**Assigned build B · band S2 · API + export · SuperDocs**
+A `.docx` that will not open, re-ingested, rebuilt, and handed back as a valid,
+styled Word file — with a plain account of what was recovered and what was not.
 
-A `.docx` that will not open leaves its owner with nothing — Word says the file
-is corrupt and offers no way forward. Drop it on this page and you get back a
-clean, styled Word file, plus a plain account of what came through and what did
-not.
+Built for the SuperDocs engineer task, assigned build B. It is built **on**
+SuperDocs, not a version of it: the recovery is local, and SuperDocs does the
+styling.
 
-![Salvage's report after recovering a truncated document: a stamped verdict, what came through, and the repaired file](screenshot.png)
+> **Best effort, and it says so.** Not every corrupted file can be repaired.
+> When the words are not in the file, this tool refuses and says why rather than
+> inventing something to fill the gap.
 
-**How it is built, and why:** [`SYSTEM_DESIGN.html`](SYSTEM_DESIGN.html) — the
-architecture, the two paths, the three named traps and where each is answered,
-the failure matrix, and every trade-off with what it cost next to what it
-bought. Open it from disk; it needs nothing.
+![The report: the verdict, what came through, and the file handed back](screenshot.png)
 
 ## What it does
 
-It opens the file the way Word will not, takes out whatever is still readable,
-and rebuilds a valid document around it.
+1. **Re-ingest.** Reads the parts out of the container by hand, going around the
+   ZIP index rather than through it — a truncated download loses the index
+   first, which is the damage Word reports as a corrupt file.
+2. **Normalize.** Repairs the body XML far enough to parse, then reads back the
+   headings, paragraphs, tables and pictures that survived.
+3. **Export a clean, styled file.** The rebuild is written as a valid package
+   and sent to SuperDocs, which returns it styled. That styled file is what you
+   get; the plain rebuild stays one click away.
+4. **Tell you what happened.** Word count, pictures recovered, pictures that
+   could not be, and the rebuilt document itself rendered on the page before you
+   decide whether to download it.
+5. **Let you set it your way.** The file arrives already styled — but if that is
+   not how you would have set it, say so in your own words and watch it change.
 
-A `.docx` is a ZIP of XML parts, and it breaks in a handful of recognisable
-ways. Each one needs a different move:
+![The counter: the document on the left, one field and a ledger on the right](screenshot-counter.png)
 
-| What is wrong | What it does about it |
-|---|---|
-| The file's index is damaged or the download was cut short | Reads the internal file headers directly and inflates each part by hand. The index lives at the *end* of the file, so it is the first thing a truncated download loses — while the content itself is usually still there. |
-| The document body is malformed — a stray `&`, an invalid character, a tag left open by the cut | Repairs each fault, then closes any elements still open at the end. It never reorders or invents content. |
-| Structural parts are missing | Regenerates them. They are standard plumbing and carry none of your content, which is why the report does not list them as a loss. |
-| Your pictures are in there somewhere | Carries them back into the rebuilt file. Images are separate members of the archive with their own headers, so they survive exactly the damage that destroys the index — and when the part that said *where* each one belonged did not survive, they go at the end under a heading rather than being placed somewhere plausible and wrong. |
-| Footnotes, headers and footers | Recovered as text and set down at the end, each under its own heading. A footnote folded silently into the body would change what the document says. |
-| The body is too damaged to parse at all | Falls back to pulling the text out run by run — and **says so**, because you are getting words back without headings or tables, and finding that out later is the failure this tool exists to prevent. |
-| The main document part is gone entirely | Says it cannot be repaired. Nothing is invented to fill the gap. |
+### The counter
 
-## What it promises, and what it does not
+A door beside the download, opening a conversation with SuperDocs about the
+document it just styled. Ask for smaller headings, tighter spacing, hairline
+table rules; the document answers and the sheet updates.
 
-It never claims a complete repair. A test asserts that — it fails the build if
-the words *fully repaired*, *guaranteed*, *perfect* or *100%* appear anywhere in
-any output the user can see.
+Three things it does that a chat window normally does not:
 
-**And it shows you the document before you take it.** The rebuilt file is
-rendered on the page — headings, tables, and the pictures — above the download
-button, because the question *was any of this worth it* is one people ask before
-they act. This is the part of the page whose honesty needs no wording at all:
+- **It shows the change, not a claim about it.** After a turn the page renders
+  SuperDocs' own markup, so a formatting change is visible rather than asserted.
+  A toggle puts *as it came back* beside *with your changes*.
+- **It never asks the same thing twice.** A turn that cannot be confirmed is
+  reconciled against the document's version id and resent only if it did not
+  land — because there is no idempotency key on a write, and a retry can apply
+  the same edit twice to a document somebody is trying to get back intact.
+- **It says what it did.** Nothing at the counter is refused for what you asked
+  for, and nothing changes silently: a turn that altered the wording reports it.
 
-> It ran for a bit and then wanted forty dollars to download the result. It just
-> said "repair successful". I didn't know if it had actually got anything.
+The conversation lives for thirty minutes of quiet, then it and the file are let
+go — the retention the page has always promised, now actually swept.
 
-**And it checks the styled copy before offering it.** A styling pass has no
-reason to change a single word, so the file that comes back is compared against
-what went out, word for word, and thrown away if the wording moved at all. This
-is not theoretical: on the first live run, a four-line recovered report came
-back with three invented paragraphs, a subtotal row, a disclaimer and a
-signature block. It opened cleanly and read better than the plain rebuild, and
-it was partly fiction — which for a recovery tool is the worst output there is,
-because its owner would not notice.
+The pictures are the part people lose, so they are the part this build is most
+careful about — carried across with their bytes unchanged, put back where the
+relationships say they belonged, and set at the end under their own heading when
+that cannot be known.
 
-Three things it will always do:
+## Run it
 
-- **Name what it lost.** Structure that could not be preserved, parts cut short
-  by the damage, content that was not there to recover.
-- **Refuse to call an empty file a success.** A valid document with nothing in it
-  is the most dangerous possible output — it opens cleanly, so the owner may not
-  notice their content is gone for weeks. That is reported as a failure.
-- **Tell you to keep the original.** It is on the result screen, every time.
+Nothing here needs a key. The styling pass does; without one you get the plain
+rebuild and a line saying so.
 
-## How much comes back
+```bash
+python3 -m venv .venv && ./.venv/bin/pip install -e ".[web,dev]"
 
-Measured over **87 broken documents** — five base documents, three of them
-written by other software, each damaged eighteen ways. Method, raw data and
-every caveat: **[RECOVERY.md](RECOVERY.md)**. Reproduce with
-`python3 -m docrepair.measure`.
+# the page
+PYTHONPATH=backend ./.venv/bin/python -m docrepair.web     # http://127.0.0.1:8000
 
-Damage is declared as one of three kinds *before* the run, because a single rate
-over mixed damage is a number that moves when you change the mix rather than
-when the tool changes:
-
-| Damage that… | n | Result |
-|---|---|---|
-| **destroys nothing** — the container or the metadata is broken and every word is still in the bytes | 40 | **40/40 fully recovered.** Word recall 1.000, worst case 1.000 |
-| **removes bytes** — a cut download, bit rot, a body severed mid-element | 27 | 14 full, 6 partial, 7 refused outright. Mean word recall 0.644, and the missing words are genuinely gone |
-| **leaves nothing to recover** — no body part, not a Word file, an empty document | 20 | 16 refused. 4 returned a picture or a header that really was still in the archive, and said so |
-
-**Empty successes: 0. Crashes: 0.** Those are the two that matter most — a file
-that opens with nothing in it is the failure this tool exists to prevent, and a
-crash tells its owner nothing at all.
-
-The most useful thing the corpus found is a warning about the obvious metric:
-cut to 30% of its bytes, the 660-word document came back **complete** and the
-25-word one came back **empty**. `word/document.xml` is written early in the
-archive, so what a truncation costs depends on where the body sits, not on the
-percentage — and any tool quoting *"70% recovered"* is quoting the wrong number.
-
-Building the corpus found four defects in this build, all fixed, all in
-`BUGS.md` — including raw XML being pasted into recovered documents on any file
-with a table, which ten passing tests and a rendered page had been sitting on
-top of.
-
-## What it uses from SuperDocs
-
-| Surface | Used for |
-|---|---|
-| **REST API** — `POST /v1/documents/upload` | Sending the recovered structure up as clean HTML |
-| **Chat editing** — `POST /v1/chat/async` | One edit instruction: restore formatting, change no content |
-| **Human-in-the-loop approval** — `POST /v1/chat/{session_id}/approve` | Approving each proposed change, with the second parse its payload requires |
-| **Export** — `POST /v1/documents/export` | Getting a styled `.docx` back |
-
-All four are reachable from the page: once the plain file is downloadable, a
-**Send it for styling** button offers a second, styled copy. It is never
-automatic — someone whose document just broke should not have it sent to a
-third-party service because a page decided that for them — and the plain rebuild
-is already in their hands before the button exists.
-
-The local rebuild is the default and needs no key, no network and no account —
-and **every failure on the SuperDocs path degrades back to it**, which a test
-asserts for each failure in turn. Details under
-[Where SuperDocs fits](#where-superdocs-fits).
-
-## Set it up
-
-**Requirements.** Python 3.10 or newer, and nothing else. Node is needed only to
-change the page — the built bundle is committed, so running it needs no Node and
-no network.
-
-```
-# Until the pull request lands, this build lives on the fork's branch. After it
-# merges, drop the --branch and clone superdocsapp/superdocs-builds instead —
-# the path inside the repository does not move.
-git clone --branch priyanshu-semwal-builds \
-  https://github.com/Priyanshu2425/superdocs-builds.git
-cd superdocs-builds/use-cases/Priyanshu2425/word-doc-repair
-
-python3 -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
-pip install -e ".[web,dev]"
-
-python3 -m docrepair.web                               # http://127.0.0.1:8000
+# the same engine, in a terminal
+PYTHONPATH=backend ./.venv/bin/python backend/cli.py broken.docx
+PYTHONPATH=backend ./.venv/bin/python backend/cli.py broken.docx --local-only
 ```
 
-Open the address it prints and drop a damaged `.docx` on the page. That is the
-whole product; everything below is optional.
+For the styling pass, put your key in `.env` at the project root:
+
+```
+SUPERDOCS_API_KEY=sk_...
+```
+
+## Try it on something broken
+
+`manual-test/fixtures/` holds eight deliberately damaged documents, each broken
+in one named way — a truncated download, a missing content-types part, unclosed
+tags, a file that was never a Word document. Drop any of them on the page.
+
+## What it accepts
+
+**Format:** `.docx` only, up to 20 MB. A `.doc` is a different, older format —
+open it in Word once and save it as `.docx` first, and if Word will not open it
+either then this tool cannot recover it. **Domain:** none. Damage is structural,
+so the words in the document are not this tool's business.
+
+## The numbers
+
+**87 fixtures: 5 base documents × 18 damage modes.** Three of the five base
+documents were written by other software — Apple `textutil`, the OPF
+`variations` converter, Google Docs — because a repair tool measured only
+against its own output is measured against its own assumptions.
+
+```
+kind         n   mean recall     min   verdicts
+lossless    40         1.000   1.000   full=40
+lossy       27         0.644   0.000   full=8 partial=12 refused=7
+fatal       20         0.003   0.000   partial=4 refused=16
+
+  empty successes    0        crashes    0
+```
+
+**On damage that destroyed no content, every word came back: 40 out of 40.**
+That is the number worth quoting, because a shortfall there would be nobody's
+fault but this tool's. The method is stated before the result, and the
+per-mode breakdown, the caveats and what is deliberately *not* measured are in
+**[RECOVERY.md](RECOVERY.md)**.
+
+Reproduce it in one command, with no key and no network:
+
+```bash
+PYTHONPATH=backend ./.venv/bin/python -m docrepair.measure
+```
+
+## Tests
+
+**169 Python tests and 57 on the page. No key, no network.**
+
+```bash
+./.venv/bin/python -m pytest tests/ -q      # 169
+cd frontend && npm install && npx vitest run # 57
+```
+
+The offline claim is checked the strong way rather than the convenient one: the
+suite passes with `SUPERDOCS_API_KEY` unset **and every socket blocked**. A
+suite that merely spends nothing has proved it is cheap, not that it is offline.
+
+They name real behaviours rather than proving the mocks work: a picture survives
+a 90% truncation; a hostile member name still produces a package that opens; a
+half-read picture is refused rather than embedded; a styled file that came back
+with the wording changed is thrown away; a contraction is never mistaken for
+somebody supplying their own words; a timed-out turn reconciles instead of
+sending twice. The picture tests are mutation-checked — breaking each fix in
+turn must turn its test red.
+
+## Reading order
 
 | | |
 |---|---|
-| `PORT=8077 python3 -m docrepair.web` | if 8000 is taken |
-| `SUPERDOCS_API_KEY=sk_… python3 -m docrepair.web` | also offers the styled copy (see [Where SuperDocs fits](#where-superdocs-fits)) |
-| no key set | the page says styling is off, in a line, and the rest works exactly as before |
+| **[BASELINE.md](BASELINE.md)** | What the system does, as invariants. **Start here before changing anything.** |
+| [RECOVERY.md](RECOVERY.md) | The recovery rate: method first, then the number |
+| [DESIGN.md](DESIGN.md) | The page, and the rules that are not style |
+| [docs/PRD-SET-IT-YOUR-WAY.md](docs/PRD-SET-IT-YOUR-WAY.md) | The counter: what it may do, what it costs, what it refuses |
+| [docs/style-it-yourself/](docs/style-it-yourself/) | Five designs for the counter, and why this one |
+| [SYSTEM_DESIGN.html](SYSTEM_DESIGN.html) | How the parts fit together |
+| `../../../BUGS.md` | Every defect, with its repro and its fix |
+| `../../../PROGRESS.md` | Every decision and assumption, dated |
 
-Nothing is written to disk and nothing is retained: uploads and repaired files
-are held in memory for one download window and then dropped.
+## Calls made while building
 
-Have a folder of them rather than one? The CLI is the same engine:
+- **The recovery floor is standard library.** No `lxml`, no `python-docx` at
+  module scope. The promise is that it runs offline in milliseconds for somebody
+  already having a bad day, and a floor that cannot import is not a floor.
+- **The rebuild is plain on purpose.** The theme, fonts and spacing of the
+  original cannot be read out of a damaged file, so they are not guessed at. The
+  styling comes from SuperDocs, which is told to change how the words are set
+  and never what they say — and is checked on the way back.
+- **A picture that cannot be written is dropped and reported**, never written
+  undeclared. An undeclared part makes Word call the whole repaired document
+  corrupt, and handing somebody a second broken file is worse than handing them
+  one picture short with a line saying so.
+- **Three of the four contract calls.** No approve step; see D1 in
+  [BASELINE.md](BASELINE.md).
+- **The counter refuses nothing for what you ask it.** The automatic pass still
+  guards its own output — that is where the model acts with nobody watching. At
+  the counter somebody asked, so the change lands and is reported instead. See
+  B20″.
+- **What a change costs us is not on the page.** Somebody whose file broke this
+  morning did not arrive with an account, and a number describing our metering
+  is not one they can act on. The allowance is still read before anything is
+  sent; it just decides, and says nothing.
 
-```
-python3 backend/cli.py broken.docx
-python3 backend/cli.py broken.docx -o fixed.docx
-python3 backend/cli.py *.docx --quiet
-python3 backend/cli.py broken.docx --via-superdocs      # needs SUPERDOCS_API_KEY
-```
-
-## Test it
-
-Three commands, six files. **None of them needs an API key, a network or a
-bucket** — every SuperDocs failure and success is driven through an injected
-fake, and every DOCX the automated tests use is written by the tests themselves
-at run time and then broken in one specific way. (The eight files under
-`manual-test/fixtures/` are committed, because those are for testing by hand,
-and the three undamaged documents under `corpus/originals/` are committed
-because the measured corpus is generated by breaking them.)
-
-```
-pip install pytest                    # the runner; the engine itself needs nothing
-python3 -m pytest                     # 72 pass, 1 skip — on a clone with nothing else
-pip install -e ".[web,dev]"
-python3 -m pytest                     # 85 pass — adds the endpoint tests
-cd frontend && npm install && npm test # 46 pass — the page, rendered and driven
-```
-
-| Suite | Count | What it holds |
-|---|---|---|
-| `tests/test_repair.py` | 31 | The engine, over a real DOCX broken eight specific ways. The assertion is never "it did not crash": the output is reopened, every required part checked, the body re-parsed, the table compared cell by cell against the original. |
-| `tests/test_styled_export.py` | 21 | The four SuperDocs calls, in order, and every way the path can fail — dead network, exhausted allowance, no job id, empty export, a job that never settles, an unreadable balance. Each one must degrade to the plain rebuild. |
-| `tests/test_web.py` | 13 | The two endpoints, called the way the page calls them. Skips rather than fails when the web extra is absent. |
-| `tests/test_frontend_fixtures.py` | 11 | Records the page's fixtures from real repairs and fails if they drift. |
-| `tests/test_corpus.py` | 9 | The measured corpus — 87 broken documents — and the numbers in [RECOVERY.md](RECOVERY.md). Fails if the committed measurements and the code disagree. |
-| `frontend/…/App.test.tsx` | 46 | The whole page rendered, answered with those recorded streams, driven through every path a person can take. |
-
-**The tests that matter most are the ones about honesty**, and they run over
-what is on the screen rather than over the engine's strings:
-
-- a missing document part **fails**, and says why
-- an empty body is a **failure**, not a success with no content
-- no user-visible string claims a complete, perfect or guaranteed repair —
-  with negations understood, because *"not a complete repair"* is the sentence
-  this build exists to say
-- structural parts the tool rebuilds are never reported as lost content
-- no engine vocabulary reaches a worried person — no `ZIP`, `XML`, `CRC`,
-  `central directory`, no exception class name
-- a styled copy whose wording changed is **thrown away**, not handed over
-
-That distinction — rendered output, not engine output — is not pedantry:
-BUG-014 was fixed in the engine and came straight back as BUG-020 in the page.
-
-**Working on the page itself:**
-
-```
-cd frontend
-npm install
-npm run dev        # vite on 5173, /api proxied to the engine on 8000
-                   # SALVAGE_API=http://127.0.0.1:8077 npm run dev  if you moved it
-npm test           # 46
-npm run build      # rewrites backend/static/index.html AND bundle-manifest.json
-```
-
-The bundle is committed so a reviewer with no Node still gets the product. The
-cost of that decision is that it can fall behind its source and nobody notices,
-so the build writes a hash over every source file and a pytest recomputes it.
-**Stale bundle, failed build** — if you change anything under `frontend/src`,
-run `npm run build` before committing.
-
-**Checking it by hand.** Three pages, all openable straight from disk:
-
-| File | What it is |
-|---|---|
-| `manual-test/index.html` | The interactive checklist — 19 items, verdicts persist across reloads, exports as Markdown |
-| `manual-test/MANUAL_QA_PLAN.html` | The record of an actual run against a live server, with what could not be run marked *not run* rather than passed |
-| `manual-test/UI_FLOWS.html` | Every path through the page, screen by screen |
-| `SYSTEM_DESIGN.html` | How it is built and why — the architecture, the two paths, the failure matrix |
-
-`manual-test/make_fixtures.py` regenerates the eight broken files in
-`manual-test/fixtures/` if you want fresh ones.
-
-## How it is tested
-
-Every test starts from a **real** DOCX this package wrote, then breaks it in one
-specific way — truncated container, missing content-types part, unclosed tags,
-bare ampersands and control characters, missing document part, not a ZIP at all,
-empty body, and an illustrated document both whole and cut short. The assertion is not "it did not crash": the output is reopened as a
-ZIP, every required part is checked, the body is re-parsed, and the recovered
-table is compared cell by cell against the original.
-
-The tests that matter most are the ones about honesty:
-
-- a missing document part **fails**, and says why
-- an empty body is a **failure**, not a success with no content
-- no user-visible string overclaims
-- structural parts the tool rebuilds are never reported as lost content
-- the user-facing lists contain no jargon — no `ZIP`, `XML`, `CRC`, or
-  `central directory` leaking out of the engine into a worried person's summary
-
-## Where SuperDocs fits
-
-The four-call contract — upload · edit instruction · approve · export — is built
-and tested in `backend/docrepair/styled_export.py`, and runs as an optional
-second pass. Set a key and the page offers it; the CLI takes a flag:
-
-```
-export SUPERDOCS_API_KEY=your-key-here
-python3 -m docrepair.web                     # the button appears on the result screen
-python3 backend/cli.py broken.docx --via-superdocs
-```
-
-Without a key the page says so in a line rather than showing a button that
-fails when somebody presses it: `GET /api/capabilities` is asked before anything
-is offered.
-
-**The allowance is read before anything is spent.** `GET /v1/agents/whoami`
-carries the remaining balance, and a styling pass that cannot finish is refused
-before the first billable call rather than discovered halfway through — trap 3,
-asked in advance. A balance that cannot be read is *not* treated as a balance of
-zero: a personal key is not an agent key, and refusing on a number nobody
-managed to read would be its own kind of bluff.
-
-**And the result is checked, not trusted.** `content_drift` compares the words
-that came back against the words that went out. Any addition or removal and the
-styled file is discarded with the reason said plainly. The instruction was
-tightened at the same time and the same document then came back word for word
-identical — but the instruction is the request and the guard is the promise.
-
-Recovered structure goes out as clean **HTML**, never raw Word XML — the docs are
-explicit that there is no endpoint for the latter — so headings stay headings and
-tables stay tables. The edit instruction restores formatting and forbids content
-changes; each proposed change is approved through the HITL endpoint (with the
-second parse the payload requires); the export comes back as a styled DOCX.
-
-**Every failure on this path degrades to the local rebuild**, and a test asserts
-it for each one: a dead network, an exhausted allowance, no job id, an empty
-export, or any unexpected exception. The engine has already produced a valid file
-before this runs, and nothing here is allowed to take that away from the user.
-
-**The local rebuild is the default, and that is deliberate.** Someone whose
-document is broken should not have to hand it to a third-party service, or wait
-on an API, to find out whether anything survived. The offline path answers that
-in milliseconds and costs nothing; the SuperDocs path is for producing a
-polished, fully-styled export once you know there is something worth styling.
-
-Session state and uploads are held in memory for one download and then dropped.
-Nothing is written to disk and nothing is retained.
-
-## Honest limitations
-
-- **The rebuilt file is deliberately plain.** Your original theme, fonts and
-  spacing cannot be recovered from a broken file, so it rebuilds with clean
-  headings, tables and body text rather than guessing at a design you had.
-- **Pictures come back; their captions and wrapping do not.** An image is placed
-  inline where the body referenced it, or at the end when nothing survived to
-  say where it belonged. Floating positions, text wrap and captions are gone.
-- **Footnotes, headers and footers come back as text, not as page furniture.** A
-  rebuild cannot put a footnote back at the foot of the page it belonged to, so
-  their text is set down at the end under its own heading and the report says so.
-- **An image whose header cannot be read is placed at a stated default size**
-  rather than at a measurement nobody took. Its aspect ratio is left alone.
-- **Comments and tracked changes are not recovered.**
-- **The styled copy carries the recovered text and nothing else.** Pictures are
-  not sent for styling: the styling pass takes clean HTML, and an image with no
-  surviving position is not something a formatting pass can place. The plain
-  rebuild is the one that has your pictures in it.
-- **A styled copy is not always available.** It needs a key, an allowance, and a
-  result that comes back saying exactly what it was given. Any of the three
-  missing and you get the plain rebuild and a sentence saying why.
-- Direct upload only, so the practical ceiling is about 20 MB.
-- `.doc` (the pre-2007 binary format) is not a ZIP at all and is not supported —
-  it is reported as unrepairable rather than silently mangled.
-
-## Testing it by hand
-
-The automated suite proves the engine does the right thing. It cannot tell you
-whether the downloaded file opens in Word, whether the progress is perceptible,
-or whether a non-technical person understands what they got back.
-
-`manual-test/index.html` is a checklist for exactly that — open it in a second
-tab. Nineteen items: eight deliberately broken fixtures with their expected
-results transcribed from real runs, four edge cases, and seven judgement calls
-no test can make. Verdicts and notes persist across reloads, and it exports the
-results as Markdown.
-
-Writing it found three defects the suite had missed: a total failure still
-rendered a "what came through" claim, one problem was reported twice, and an
-exception class name leaked into a stage line. All three are fixed, and the
-suite now guards the stage log as well as the summary.
-
-## Shared code — stated plainly
-
-`backend/docrepair/superdocs_client.py` is the same four-call client used by the
-quota-aware agent (assigned build A). It is vendored into both so each stands
-alone in the builds repository. Reuse is only a shortcut when it is hidden.
-
-## Credit
-
-Built by **Priyanshu Semwal** ([@Priyanshu2425](https://github.com/Priyanshu2425))
-for the SuperDocs engineer round, 2026. MIT licensed — see [LICENSE](LICENSE).
-
-Grounded throughout in the SuperDocs API documentation; where the task brief and
-the documentation differed, the documentation won.
+Built for the SuperDocs task. MIT licensed.

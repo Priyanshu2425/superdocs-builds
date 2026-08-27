@@ -3,66 +3,49 @@
   "filename": "03-unclosed-tags.docx",
   "events": [
     {
-      "stage": "open",
-      "message": "Opening the file…"
+      "stage": "Scanning Headers",
+      "message": "Reading the parts out of the file…"
     },
     {
-      "stage": "open",
-      "message": "The container opened cleanly."
-    },
-    {
-      "stage": "inventory",
-      "message": "Found 5 sections inside the document."
-    },
-    {
-      "stage": "xml",
+      "stage": "Repairing XML",
       "message": "Checking the document body for damage…"
     },
     {
-      "stage": "xml",
+      "stage": "Repairing XML",
       "message": "Closed 6 elements that the damage had left open."
     },
     {
-      "stage": "read",
-      "message": "Reading headings, paragraphs and tables…"
+      "stage": "Reading Body",
+      "message": "Looking for pictures…"
     },
     {
-      "stage": "read",
-      "message": "The document's structure was too damaged to read. Recovering the text on its own instead."
-    },
-    {
-      "stage": "read",
-      "message": "Recovered 6 paragraphs."
-    },
-    {
-      "stage": "write",
+      "stage": "Writing File",
       "message": "Rebuilding a clean Word file…"
     },
     {
-      "stage": "done",
-      "message": "Done. The rebuilt file is ready to download."
+      "stage": "Done",
+      "message": "The rebuilt file is ready to download."
     }
   ],
   "report": {
     "ok": true,
-    "summary": "Recovered what could be read and rebuilt it as a valid Word file. This is a best-effort recovery, not a complete repair. The document's structure was too damaged to read, so the text was extracted run by run — you are getting the words back, but the headings, tables and formatting are gone.",
-    "recovered": [
-      "closed 6 elements that the damage had left open",
-      "recovered the text of 6 paragraphs"
-    ],
-    "lost": [
-      "the document structure was unreadable, so headings, tables and formatting could not be preserved — only the text was recovered"
-    ],
-    "counts": {
-      "headings": 0,
-      "paragraphs": 6,
-      "tables": 0,
-      "pictures": 0
-    },
-    "structure_preserved": false,
-    "filename": "03-unclosed-tags-repaired.docx",
-    "preview_html": "<p>Quarterly Report</p>\n<p>Revenue rose in Q3 — driven by renewals &amp; upsell.</p>\n<p>Regional breakdown</p>\n<p>Region</p>\n<p>Revenue</p>\n<p>EMEA</p>",
+    "verdict": "full",
+    "word_count": 15,
+    "method": "xml",
+    "asides_text": "",
+    "output_path": "",
+    "lost": [],
+    "preview_html": "<h1>Quarterly Report</h1>\n<p>Revenue rose in Q3 — driven by renewals &amp; upsell.</p>\n<h2>Regional breakdown</h2>\n<table><tr><td>Region</td><td>Revenue</td></tr><tr><td>EMEA</td></tr></table>",
+    "structure_preserved": true,
+    "images_recovered": 0,
+    "images_unplaced": 0,
+    "images_lost": [],
+    "tables_recovered": 1,
     "download": "/api/download/unclosed-tags-token",
-    "style": "/api/style/unclosed-tags-token"
+    "style": "/api/style/unclosed-tags-token",
+    "styled": false,
+    "styling_note": "",
+    "styling_rejected": false,
+    "plain_download": "/api/download/unclosed-tags-token"
   }
 }

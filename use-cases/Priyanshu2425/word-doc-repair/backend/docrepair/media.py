@@ -66,10 +66,32 @@ class Image:
     width_px: int
     height_px: int
     measured: bool       # False when the dimensions are the stated fallback
+    #: False when the bytes stop before the format's own end marker. A picture
+    #: recovered only up to the break is not a picture: Word draws a placeholder
+    #: where it should be, and the file claims a recovery that did not happen.
+    complete: bool = True
 
     @property
     def ext(self) -> str:
-        return self.name.rsplit(".", 1)[-1].lower() if "." in self.name else "png"
+        """The extension the bytes justify, not the one the name claims.
+
+        A member called `.png` holding a JPEG is written by more tools than it
+        should be, and a `.wdp` or a `.heic` has no OOXML content type at all.
+        Declaring the wrong type — or failing to declare one — produces a
+        package Word calls corrupt, which is this tool handing somebody a second
+        broken file. So the bytes decide, and a format we cannot name is refused
+        by `writable` rather than guessed at.
+        """
+        sniffed = sniff_ext(self.data)
+        if sniffed:
+            return sniffed
+        claimed = self.name.rsplit(".", 1)[-1].lower() if "." in self.name else ""
+        return claimed if claimed in CONTENT_TYPES else ""
+
+    @property
+    def writable(self) -> bool:
+        """Whether this picture can go into a package that will still open."""
+        return bool(self.ext) and self.complete
 
     @property
     def content_type(self) -> str:
@@ -87,6 +109,65 @@ class Image:
 
 
 # -- reading a size out of the bytes ----------------------------------------
+
+#: Magic numbers, longest first so a prefix never shadows a longer signature.
+_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+    (b"\xff\xd8\xff", "jpg"),
+    (b"BM", "bmp"),
+    (b"II*\x00", "tif"),
+    (b"MM\x00*", "tif"),
+    (b"\xd7\xcd\xc6\x9a", "wmf"),
+    (b"\x01\x00\x00\x00", "emf"),
+)
+
+
+def sniff_ext(data: bytes) -> str:
+    """The format's own name for itself, or "" when the bytes do not say.
+
+    Only formats with a declared OOXML content type are recognised, because the
+    single caller wants to know what it may write into a package — and "this is
+    an HD Photo" is, for that question, the same answer as "I do not know".
+    """
+    if not data:
+        return ""
+    for magic, ext in _MAGIC:
+        if data.startswith(magic):
+            return ext
+    # RIFF....WEBP, and SVG, which is text and so has no fixed magic number.
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    head = data[:512].lstrip()
+    if head.startswith(b"<svg") or (head.startswith(b"<?xml") and b"<svg" in data[:512]):
+        return "svg"
+    return ""
+
+
+def is_complete(data: bytes) -> bool:
+    """Whether the bytes run all the way to the format's own end marker.
+
+    `salvage` deliberately keeps the prefix of a stream that went bad partway,
+    which is the right call for a document body — half the words beat none of
+    them. It is the wrong call for a picture, which is why the check lives here
+    and not there: half a PNG is not half a photograph, it is a grey box.
+
+    Formats without an end marker to check are taken at their word rather than
+    called damaged on no evidence.
+    """
+    if not data:
+        return False
+    ext = sniff_ext(data)
+    if ext == "png":
+        # The IEND chunk closes the file; a trailing CRC follows it.
+        return data.rstrip(b"\x00").endswith(b"IEND\xaeB`\x82")
+    if ext == "jpg":
+        return data.rstrip(b"\x00").endswith(b"\xff\xd9")
+    if ext == "gif":
+        return data.rstrip(b"\x00").endswith(b"\x3b")
+    return True
+
 
 def image_size(data: bytes) -> tuple[int, int] | None:
     """Width and height from the image's own header, or None.
@@ -153,6 +234,7 @@ def collect(members: dict[str, bytes]) -> dict[str, Image]:
             width_px=size[0] if size else FALLBACK_PX[0],
             height_px=size[1] if size else FALLBACK_PX[1],
             measured=size is not None,
+            complete=is_complete(data),
         )
     return out
 
@@ -161,6 +243,18 @@ def collect(members: dict[str, bytes]) -> dict[str, Image]:
 
 _REL_RE = re.compile(
     rb'Id="(?P<id>[^"]+)"[^>]*?Target="(?P<target>[^"]+)"', re.S)
+_EXTERNAL_RE = re.compile(rb'TargetMode="External"')
+
+#: Marks a target that was never inside the package. A picture linked from a URL
+#: or a drive path is not a picture this file ever carried, so reporting it as
+#: content lost to the damage would be telling somebody they lost something they
+#: never had here. The prefix cannot collide with a member name because a member
+#: name may not contain a colon at this position.
+EXTERNAL = "external:"
+
+
+def is_external(target: str) -> bool:
+    return target.startswith(EXTERNAL)
 
 
 def relationship_targets(rels_xml: bytes | None) -> dict[str, str]:
@@ -178,12 +272,19 @@ def relationship_targets(rels_xml: bytes | None) -> dict[str, str]:
         for rel in ET.fromstring(rels_xml):
             rid, target = rel.get("Id"), rel.get("Target")
             if rid and target:
-                targets[rid] = _normalise(target)
+                targets[rid] = (EXTERNAL + target
+                                if rel.get("TargetMode") == "External"
+                                else _normalise(target))
         return targets
     except ET.ParseError:
         for m in _REL_RE.finditer(rels_xml):
-            targets[m.group("id").decode("utf-8", "replace")] = _normalise(
-                m.group("target").decode("utf-8", "replace"))
+            target = m.group("target").decode("utf-8", "replace")
+            # The regex pass reads one relationship element at a time, so the
+            # mode is whatever sits between this Id and the end of its tag.
+            tail = rels_xml[m.end():rels_xml.find(b">", m.end()) + 1]
+            external = bool(_EXTERNAL_RE.search(m.group(0) + tail))
+            targets[m.group("id").decode("utf-8", "replace")] = (
+                EXTERNAL + target if external else _normalise(target))
         return targets
 
 
@@ -213,6 +314,18 @@ def embedded_ids(element: ET.Element) -> list[str]:
     return ids
 
 
+def esc_attr(s: str) -> str:
+    """Text made safe to sit inside a double-quoted XML attribute.
+
+    Shared by the two places that write a name or a target read out of the
+    damaged file. Both used to interpolate it raw, and a member called
+    `a"b.png` was enough to produce a rebuild that would not open — the one
+    failure this package exists to prevent, reintroduced by its own writer.
+    """
+    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+             .replace('"', "&quot;").replace("'", "&apos;"))
+
+
 def drawing_xml(rel_id: str, image: Image, doc_pr_id: int, name: str) -> str:
     """One inline image, as Word's own drawing markup.
 
@@ -223,6 +336,10 @@ def drawing_xml(rel_id: str, image: Image, doc_pr_id: int, name: str) -> str:
     prevent.
     """
     cx, cy = image.extent
+    # The name comes out of the original archive, which is exactly the input
+    # this package must not trust: one quote in it and the drawing's markup is
+    # malformed, which means the *repaired* file does not open either.
+    name = esc_attr(name)
     return (
         "<w:p><w:r><w:drawing>"
         f'<wp:inline distT="0" distB="0" distL="0" distR="0">'

@@ -1,107 +1,105 @@
 #!/usr/bin/env python3
-"""Same engine as the web page, for people who live in a terminal.
+"""The terminal door to the same engine as the web page.
 
-The web page is the product. This exists because a batch of fifty files is not
-a drag-and-drop job, and because a shared engine means the two front doors can
-never disagree about what was recovered.
+    python3 backend/cli.py broken.docx
+    python3 backend/cli.py broken.docx --local-only
 
-    python3 cli.py broken.docx
-    python3 cli.py broken.docx -o fixed.docx
-    python3 cli.py *.docx --quiet
-    python3 cli.py broken.docx --via-superdocs   # also style it through SuperDocs
+The recovery is one flow: the damaged file is rebuilt locally, and the rebuild
+is styled through SuperDocs. The styled file is the deliverable — that is what
+this build promises — and the plain rebuild is what you get instead when the
+styling pass cannot run. `--local-only` skips the pass entirely, for working
+offline or without spending an operation.
+
+It prints a strict JSON manifest to stdout and exits 0 even when the styling
+pass fails, because a styling failure is not the caller's failure: they still
+have a recovered document.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
-from docrepair import repair
-from docrepair.docx import read_blocks
+from docrepair import engine
+from docrepair.superdocs_client import SuperDocsClient
 
 
-def _style_through_superdocs(r, quiet: bool):
-    """Optional second pass. Never allowed to cost the caller the local result."""
-    import io
-    import os
-    import zipfile
-
-    from docrepair.styled_export import styled_export
-    from docrepair.superdocs_client import HttpTransport, SuperDocsClient
-
-    key = os.environ.get("SUPERDOCS_API_KEY")
-    if not key:
-        print("  SUPERDOCS_API_KEY is not set; keeping the plain rebuild.", file=sys.stderr)
-        return None
-    with zipfile.ZipFile(io.BytesIO(r.output)) as z:
-        blocks = read_blocks(z.read("word/document.xml"))
-    client = SuperDocsClient(HttpTransport(key))
-    res = styled_export(
-        client, f"repair-{os.getpid()}", blocks,
-        on_progress=None if quiet else lambda s, m: print(f"  {m}", file=sys.stderr),
-    )
-    return res
-
-
-def one(path: Path, out: Path | None, quiet: bool, via_superdocs: bool = False) -> bool:
+def run(path: Path, local_only: bool) -> int:
     data = path.read_bytes()
-    r = repair(data, path.name,
-               on_progress=None if quiet else lambda s, m: print(f"  {m}", file=sys.stderr))
+    name = path.name
 
-    print(f"\n{path.name}")
-    print(f"  {r.summary()}")
-    for line in r.recovered:
-        print(f"  + {line}")
-    for line in r.lost:
-        print(f"  - {line}")
+    result = engine.repair(data, name)
 
-    if not r.ok:
-        return False
+    path_taken = "local_only" if local_only else "local"
+    styling_note = ""
+    delivered = result.output_path
 
-    blob = r.output
-    if via_superdocs:
-        styled = _style_through_superdocs(r, quiet)
-        if styled and styled.ok:
-            blob = styled.output
-            qualifier = "" if styled.ops_confirmed else " estimated"
-            unit = "operation" if styled.ops_charged == 1 else "operations"
-            print(f"  + styled through SuperDocs ({styled.ops_charged}{qualifier} {unit})")
-        elif styled:
-            for n in styled.notes[-1:]:
-                print(f"  · {n}")
+    if result.ok and not local_only:
+        styling = SuperDocsClient().style(
+            result.output, Path(result.output_path).name,
+            on_progress=lambda stage, message: print(
+                f"  {message}", file=sys.stderr),
+        )
+        styling_note = styling.note
+        if styling.ok:
+            out = Path(result.output_path).with_name("final_recovered.docx")
+            out.write_bytes(styling.output)
+            delivered = str(out)
+            path_taken = "superdocs_success"
+        elif styling.rejected_for_content:
+            path_taken = "superdocs_rejected"
+        else:
+            path_taken = "superdocs_failed"
 
-    dest = out or path.with_name(r.filename)
-    dest.write_bytes(blob)
-    print(f"  → {dest}")
-    return True
+    manifest = {
+        "verdict": result.verdict,
+        "word_count": result.word_count,
+        # Reported because a recovery that lost the photographs is not the same
+        # recovery as one that kept them, and a manifest that says only how many
+        # words came back cannot tell the two apart.
+        "images_recovered": result.images_recovered,
+        "images_unplaced": result.images_unplaced,
+        "images_lost": result.images_lost,
+        "tables_recovered": result.tables_recovered,
+        "structure_preserved": result.structure_preserved,
+        "path_taken": path_taken,
+        # Which file the caller should actually take. The styled one when there
+        # is one, the plain rebuild when there is not -- named either way, so a
+        # script never has to infer it from path_taken.
+        "delivered": delivered,
+        "styled": path_taken == "superdocs_success",
+        "styling_note": styling_note,
+    }
+    print(json.dumps(manifest))
+    # Graceful degradation: SuperDocs failure is not the caller's failure.
+    return 0
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("files", nargs="+", type=Path)
-    p.add_argument("-o", "--out", type=Path, help="output path (single input only)")
-    p.add_argument("-q", "--quiet", action="store_true", help="hide per-stage progress")
+    p = argparse.ArgumentParser(
+        description="Best-effort recovery for a Word document that will not open.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("filepath", type=Path, help="the damaged .docx file")
+    p.add_argument("--local-only", action="store_true",
+                   help="skip the SuperDocs styling pass and keep the plain "
+                        "rebuild (no key needed, no operation spent)")
+    # Accepted and ignored: styling is the default path now, and a script that
+    # still passes this flag should keep working rather than fail on an
+    # unrecognised argument.
     p.add_argument("--via-superdocs", action="store_true",
-                   help="also style the result through SuperDocs (needs SUPERDOCS_API_KEY)")
+                   help=argparse.SUPPRESS)
+    p.add_argument("--auto-approve", action="store_true",
+                   help=argparse.SUPPRESS)
     a = p.parse_args(argv)
 
-    if a.out and len(a.files) > 1:
-        p.error("--out takes a single input file")
+    if not a.filepath.exists():
+        print(f"{a.filepath}: no such file", file=sys.stderr)
+        return 2
 
-    failures = 0
-    for f in a.files:
-        if not f.exists():
-            print(f"{f}: no such file", file=sys.stderr)
-            failures += 1
-            continue
-        if not one(f, a.out, a.quiet, a.via_superdocs):
-            failures += 1
-
-    if failures:
-        print(f"\n{failures} of {len(a.files)} file(s) could not be repaired.", file=sys.stderr)
-    return 1 if failures else 0
+    return run(a.filepath, a.local_only)
 
 
 if __name__ == "__main__":

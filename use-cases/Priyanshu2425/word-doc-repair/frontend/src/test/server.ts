@@ -75,10 +75,7 @@ let stylingAnswer: {
     notes: ["SuperDocs returned a styled file."],
     filename: "d-repaired-styled.docx",
     download: "/api/download/styled-token",
-    ops_charged: 1,
     ops_confirmed: false,
-    allowance_known: true,
-    allowance_remaining: 42,
     warnings: 0,
   },
 };
@@ -86,16 +83,123 @@ export function serveStyling(next: Partial<typeof stylingAnswer>) {
   stylingAnswer = { ...stylingAnswer, ...next };
 }
 
-function ndjson(lines: string[]) {
+/** Overrides layered onto the served capture's own styling-outcome fields in
+ *  the final `/api/recover` event -- B3 moved styling inside the recovery, so
+ *  this is where its outcome now varies, the same job `serveStyling` did for
+ *  the old standalone endpoint. Only these fields are touched; everything
+ *  else in the capture's `report` (verdict, counts, preview) still comes from
+ *  the fixture untouched, per B26. `null` clears the override. */
+let stylingOutcome: Partial<{
+  styled: boolean;
+  styling_note: string;
+  styling_rejected: boolean;
+  download: string | null;
+  plain_download: string | null;
+}> | null = null;
+export function serveStylingOutcome(
+  o: Partial<{
+    styled: boolean;
+    styling_note: string;
+    styling_rejected: boolean;
+    download: string | null;
+    plain_download: string | null;
+  }> | null,
+): void {
+  stylingOutcome = o;
+}
+
+/** The actual wire shape `readStream` (lib/repair.ts) parses: `data: {json}`
+ *  lines, each terminated by a blank line. A single trailing "\n" per line
+ *  (what this used to send) never produces the "\n\n" `readStream` splits on,
+ *  so nothing was ever read from it -- every repair in this suite failed with
+ *  "the connection dropped" regardless of what the fixture said. */
+function sse(lines: string[]) {
   const body = new ReadableStream({
     start(controller) {
       const encoder = new TextEncoder();
       const limit = cutAfter ?? lines.length;
-      lines.slice(0, limit).forEach((l) => controller.enqueue(encoder.encode(l + "\n")));
+      lines.slice(0, limit).forEach((l) => controller.enqueue(encoder.encode(`data: ${l}\n\n`)));
       controller.close();
     },
   });
-  return new HttpResponse(body, { headers: { "content-type": "application/x-ndjson" } });
+  return new HttpResponse(body, { headers: { "content-type": "text/event-stream" } });
+}
+
+/** State for the counter's five endpoints (PRD §12 / Task 3), kept the same
+ *  way `serving`/`stylingAnswer` already are: one mutable object a test bends
+ *  before acting, reset between tests. */
+let counter: {
+  turnsLeft: number;
+  turnsCap: number;
+  retentionSeconds: number;
+  receipts: Record<string, unknown>[];
+  download: string;
+  plainDownload: string;
+  authoredWords: number;
+  /** The current sheet -- "" means no accepted turn has changed the document
+   *  yet, so the client should show `report.preview_html` instead. */
+  previewHtml: string;
+  /** What `previewHtml` was before each applied turn, so a revert can hand
+   *  the sheet back exactly what was on screen before that turn landed. */
+  previewStack: string[];
+} = {
+  turnsLeft: 10,
+  turnsCap: 10,
+  retentionSeconds: 1800,
+  receipts: [],
+  download: "/api/download/truncated-token",
+  plainDownload: "/api/download/truncated-token",
+  authoredWords: 0,
+  previewHtml: "",
+  previewStack: [],
+};
+export function resetCounter(next: Partial<typeof counter> = {}) {
+  counter = {
+    turnsLeft: 10,
+    turnsCap: 10,
+    retentionSeconds: 1800,
+    receipts: [],
+    download: "/api/download/truncated-token",
+    plainDownload: "/api/download/truncated-token",
+    authoredWords: 0,
+    previewHtml: "",
+    previewStack: [],
+    ...next,
+  };
+}
+
+/** How the *next* turn answers: whether it applied, what it cost, and the
+ *  note that becomes both the ledger line and the "said" sentence. Queued
+ *  rather than fixed, because the scenario this feature exists to get right —
+ *  two kinds of no — needs consecutive turns that read differently. */
+let nextTurn: {
+  stages: string[];
+  applied: boolean;
+  note: string;
+  previewHtml?: string;
+} = {
+  stages: ["Sending your change to SuperDocs…"],
+  applied: true,
+  note: "Done.",
+};
+export function serveTurn(next: Partial<typeof nextTurn>) {
+  nextTurn = { ...nextTurn, ...next };
+}
+
+/** Holds the next `/turn` response open until released -- so a test can
+ *  observe the field disabled mid-flight instead of racing a mock that
+ *  otherwise answers within a tick. */
+let turnGate: Promise<void> | null = null;
+let releaseGate: (() => void) | null = null;
+export function holdNextTurn() {
+  turnGate = new Promise((resolve) => {
+    releaseGate = resolve;
+  });
+}
+export function releaseNextTurn() {
+  releaseGate?.();
+  turnGate = null;
+  releaseGate = null;
 }
 
 export const handlers = [
@@ -107,19 +211,103 @@ export const handlers = [
     if (stylingAnswer.status !== 200) {
       return HttpResponse.json({ detail: stylingAnswer.detail }, { status: stylingAnswer.status });
     }
-    return ndjson([
+    return sse([
       ...stylingAnswer.stages.map((m) => JSON.stringify({ stage: "superdocs", message: m })),
       JSON.stringify({ done: true, ...stylingAnswer.final }),
     ]);
   }),
 
-  http.post("/api/repair", () => {
+  http.post("/api/recover", () => {
     const capture = serving;
-    return ndjson([
+    const report = stylingOutcome ? { ...capture.report, ...stylingOutcome } : capture.report;
+    return sse([
       ...capture.events.map((e) => JSON.stringify(e)),
-      JSON.stringify({ done: true, ...capture.report }),
+      JSON.stringify({ done: true, ...report }),
     ]);
   }),
+
+  http.post("/api/style/:token/open", () =>
+    HttpResponse.json({
+      session: "test-session",
+      turns_left: counter.turnsLeft,
+      turns_cap: counter.turnsCap,
+      retention_seconds: counter.retentionSeconds,
+      receipts: counter.receipts,
+    }),
+  ),
+
+  http.post("/api/style/:token/turn", async ({ request }) => {
+    const body = (await request.json()) as { message: string };
+    if (turnGate) await turnGate;
+    const turn = nextTurn;
+    counter.turnsLeft = Math.max(0, counter.turnsLeft - 1);
+    const receipt = {
+      asked: body.message,
+      note: turn.note,
+      turn_index: counter.receipts.length + 1,
+      applied: turn.applied,
+      supplied: null,
+    };
+    counter.receipts = [...counter.receipts, receipt];
+    if (turn.applied) {
+      counter.download = `/api/download/truncated-token-v${counter.receipts.length}`;
+      // Only an applied turn moves the sheet -- a refusal changes nothing,
+      // so it pushes no new preview and the stack it could be reverted onto
+      // stays untouched.
+      counter.previewStack.push(counter.previewHtml);
+      counter.previewHtml = turn.previewHtml ?? "";
+    }
+    const final: Record<string, unknown> = {
+      done: true,
+      applied: turn.applied,
+      note: turn.note,
+      turns_left: counter.turnsLeft,
+      turns_cap: counter.turnsCap,
+      receipts: counter.receipts,
+      download: counter.download,
+      plain_download: counter.plainDownload,
+      authored_words: counter.authoredWords,
+      preview_html: turn.applied ? counter.previewHtml : "",
+    };
+    return sse([
+      ...turn.stages.map((m) => JSON.stringify({ stage: "superdocs", message: m })),
+      JSON.stringify(final),
+    ]);
+  }),
+
+  http.post("/api/style/:token/revert", () => {
+    const popped = counter.receipts[counter.receipts.length - 1] as
+      | { asked?: string }
+      | undefined;
+    counter.receipts = counter.receipts.slice(0, -1);
+    // Hand the sheet back exactly what it showed before the reverted turn --
+    // "" once the stack is exhausted, meaning back to the original rebuild.
+    counter.previewHtml = counter.previewStack.pop() ?? "";
+    return HttpResponse.json({
+      note: "That change was put back.",
+      compose_text: popped?.asked ?? "",
+      session: "test-session",
+      turns_left: counter.turnsLeft,
+      turns_cap: counter.turnsCap,
+      retention_seconds: counter.retentionSeconds,
+      receipts: counter.receipts,
+      preview_html: counter.previewHtml,
+    });
+  }),
+
+  http.get("/api/style/:token/session", () =>
+    HttpResponse.json({
+      turns_left: counter.turnsLeft,
+      turns_cap: counter.turnsCap,
+      receipts: counter.receipts,
+      download: counter.download,
+      plain_download: counter.plainDownload,
+      authored_words: counter.authoredWords,
+      preview_html: counter.previewHtml,
+    }),
+  ),
+
+  http.delete("/api/style/:token/session", () => HttpResponse.json({ disposed: true })),
 ];
 
 export const server = setupServer(...handlers);

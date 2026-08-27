@@ -49,6 +49,12 @@ def _words(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", plain.lower())
 
 
+def _without_data_uris(html: str) -> str:
+    import re
+
+    return re.sub(r'src="data:[^"]*"', 'src=""', html)
+
+
 def docx_text(blob: bytes) -> str:
     """The text of a .docx, run by run. Deliberately not a full parse: this is
     asked only "what does it say"."""
@@ -72,7 +78,11 @@ def content_drift(sent_html: str, got_docx: bytes) -> tuple[int, int]:
     """
     from collections import Counter
 
-    before = Counter(_words(sent_html))
+    # Base64 image payloads are not words and must not be counted as any: a
+    # data URI is megabytes of [a-z0-9]+ that the styled file will never echo
+    # back, which would read as an enormous deletion and fail every document
+    # that has a picture in it.
+    before = Counter(_words(_without_data_uris(sent_html)))
     after = Counter(_words(docx_text(got_docx)))
     added = sum((after - before).values())
     removed = sum((before - after).values())
@@ -148,7 +158,13 @@ def styled_export(client: SuperDocsClient, session_id: str, blocks: list[Block],
         if on_progress:
             on_progress("superdocs", msg)
 
-    html = blocks_to_html(blocks)
+    # `inline_images=True` is not a preview nicety here: without it
+    # `blocks_to_html` drops every picture on the floor, so the styled document
+    # came back with none of them and the word-only drift guard waved it through.
+    # If this path is ever preferred over sending the rebuilt file, the pictures
+    # should go up via POST /v1/documents/images/upload-base64 and be referenced
+    # by the URL it returns, rather than as data URIs.
+    html = blocks_to_html(blocks, inline_images=True)
 
     # 0 -- the allowance, before a single billable call. Starting a styling pass
     # that cannot finish would leave someone watching a progress line for work

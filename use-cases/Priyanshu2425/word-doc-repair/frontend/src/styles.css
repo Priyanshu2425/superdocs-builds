@@ -395,3 +395,218 @@ h1 {
 .preview__doc td { border: 1px solid var(--rule-firm); padding: 5px 9px; }
 .preview__doc .image-omitted { color: var(--ink-3); font-style: italic; }
 @media (max-width: 520px) { .preview__sheet { padding: 16px; max-height: 300px; } }
+
+/* ── The counter ──────────────────────────────────────────────────────────
+   Where a person sets the repaired document their own way. The document holds
+   the left; the rail holds one field, one sentence back, and receipts — one
+   ruled line each, the way a statement lists what has happened to an account.
+
+   There is no transcript on screen. This page already folds the working away
+   once the verdict is known, and the same rule applies here: the reply to
+   "make the headings smaller" is smaller headings, not a paragraph claiming
+   they are smaller. The full exchange sits behind a disclosure for whoever
+   wants it, and the width a transcript would have taken goes to the sheet.
+
+   Design: docs/style-it-yourself/v5-quiet-counter.html. Logic: docs/PRD-SET-IT-YOUR-WAY.md. */
+
+/* The counter owns the viewport and nothing outside it scrolls. `min-height`
+   let the rail grow with its own content, which pushed the field -- the one
+   control this screen exists for -- below the fold, so you had to scroll past
+   an empty ledger to find it. The document scrolls inside its pane and the
+   receipts inside theirs; the field stays put. `dvh` rather than `vh` so a
+   phone's collapsing address bar does not hide it either. */
+.counter {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+.counter__bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 20px;
+  background: var(--sheet);
+  border-bottom: 1px solid var(--rule-firm);
+}
+.counter__bar .record { margin: 0; border: 0; padding: 0; }
+.counter__acts { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+
+.counter__split { flex: 1; display: grid; grid-template-columns: 1fr 312px; min-height: 0; }
+@media (max-width: 900px) {
+  .counter__split { grid-template-columns: 1fr; }
+  /* One column: the document holds the screen and the rail follows underneath,
+     so the page scrolls as a page. Trapping two independent scrollers in one
+     narrow column is how a phone loses the thing it was reaching for. */
+  .counter { height: auto; min-height: 100dvh; overflow: visible; }
+  .counter__scroll, .ledger { overflow: visible; }
+}
+
+/* left: the document, and the toggle that shows what changed */
+.counter__pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.counter__head { flex: none; display: flex; align-items: center; gap: 16px; padding: 15px 24px 13px; }
+.counter__head h2 { margin: 0; font-size: var(--t4); font-weight: 640; }
+.counter__head p { margin: 0; font-size: var(--t2); color: var(--ink-3); }
+
+.two { margin-left: auto; display: flex; border: 1px solid var(--rule-firm); background: var(--sheet); }
+.two button {
+  font: inherit;
+  font-size: var(--t2);
+  background: none;
+  border: 0;
+  border-right: 1px solid var(--rule);
+  color: var(--ink-2);
+  padding: 7px 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.two button:last-child { border-right: 0; }
+.two button:hover { color: var(--ink); background: var(--stock); }
+.two button[aria-pressed="true"] { background: var(--post-blue); color: #fff; }
+
+.counter__scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 24px 36px; }
+.counter__sheet {
+  background: var(--sheet);
+  border: 1px solid var(--rule-firm);
+  padding: 34px 40px 42px;
+  max-width: 840px;
+  margin: 0 auto;
+}
+
+/* right: the rail */
+.rail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--stock);
+  border-left: 1px solid var(--rule-firm);
+}
+@media (max-width: 900px) { .rail { border-left: 0; border-top: 1px solid var(--rule-firm); } }
+.rail__head { flex: none; padding: 15px 18px 14px; background: var(--sheet); border-bottom: 1px solid var(--rule); }
+.rail__head h2 { margin: 0; font-size: var(--t4); font-weight: 640; }
+.rail__head p { margin: 5px 0 0; font-size: var(--t2); color: var(--ink-2); }
+
+/* the one sentence back */
+.said { flex: none; padding: 16px 18px 14px; border-bottom: 1px solid var(--rule); }
+.said__lead { font-size: var(--t4); line-height: 1.5; color: var(--ink); margin: 0; }
+.said__meta {
+  margin: 11px 0 0;
+  font-family: var(--mono);
+  font-size: var(--t1);
+  color: var(--ink-3);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.said__meta i { width: 9px; height: 9px; background: var(--post-blue); font-style: normal; display: inline-block; }
+.said--refused .said__meta i { background: var(--post-red); }
+
+/* receipts */
+.ledger { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 18px 16px; }
+.ledger h3 {
+  margin: 12px 0 4px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-weight: 600;
+}
+.entry {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  gap: 9px;
+  align-items: start;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--rule);
+  font-size: var(--t2);
+}
+.entry i { width: 9px; height: 9px; margin-top: 6px; background: var(--post-blue); font-style: normal; display: block; }
+.entry span { color: var(--ink-2); line-height: 1.5; }
+.entry time { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); padding-top: 2px; }
+/* A refusal is a loss of something asked for, so it takes the red mark. The
+   line says which kind it was: one made before anything was sent cost nothing,
+   one made on a file that came back wrong had already been charged for. */
+.entry--refused i { background: var(--post-red); }
+.entry--refused b { color: var(--post-red); font-weight: 640; }
+
+.full { margin: 14px 0 0; border-top: 1px solid var(--rule); padding-top: 12px; }
+.full summary { font-size: var(--t2); color: var(--ink-2); cursor: pointer; }
+.full summary:hover { color: var(--ink); }
+.full .turn { display: grid; grid-template-columns: 48px 1fr; gap: 9px; padding: 9px 0; border-bottom: 1px solid var(--rule); }
+.full .who {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding-top: 3px;
+}
+.full .says { font-size: var(--t2); line-height: 1.55; color: var(--ink-2); }
+.full .turn--you .says { color: var(--ink); font-weight: 520; }
+
+/* the field that spends the allowance, with what is left beside it */
+.ask { flex: none; border-top: 1px solid var(--rule-firm); background: var(--sheet); padding: 13px 18px 15px; }
+.field {
+  border: 2px solid var(--ink);
+  background: var(--sheet);
+  display: flex;
+  align-items: flex-end;
+  gap: 9px;
+  padding: 9px 9px 9px 12px;
+}
+.field textarea {
+  flex: 1;
+  border: 0;
+  background: none;
+  resize: none;
+  font: inherit;
+  font-size: var(--t3);
+  color: var(--ink);
+  outline: none;
+  height: 52px;
+  line-height: 1.5;
+}
+.field textarea::placeholder { color: var(--ink-3); }
+.field textarea:disabled { color: var(--ink-3); }
+.send {
+  font: inherit;
+  font-size: var(--t2);
+  font-weight: 640;
+  background: var(--post-blue);
+  color: #fff;
+  border: 0;
+  padding: 9px 14px;
+  cursor: pointer;
+}
+.send:disabled { background: var(--rule-firm); cursor: default; }
+.left-today {
+  margin: 10px 0 0;
+  font-family: var(--mono);
+  font-size: var(--t1);
+  color: var(--ink-3);
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  line-height: 1.5;
+}
+.left-today i { width: 8px; height: 8px; margin-top: 4px; background: var(--kept); font-style: normal; display: inline-block; flex: none; }
+.left-today b { color: var(--ink-2); font-weight: 500; }
+
+/* Where the counter cannot be opened, one sentence stands in place of the
+   field. A step this copy of the page cannot take is never drawn as a button. */
+.shut { margin: 0; font-size: var(--t2); color: var(--ink-2); line-height: 1.55; }
+
+/* the door, in the handover panel */
+.door { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+.door .keep { margin: 0; }
+
+/* The counter reuses <Preview> rather than a second renderer (Task 4). On the
+   report page Preview shares the page with the verdict below it, so its own
+   box is capped at 380px; inside the counter the document owns the whole
+   pane, so that cap (and its now-redundant border) are turned off here --
+   .counter__sheet already supplies the box. */
+.counter__sheet .preview { margin: 0; }
+.counter__sheet .preview__sheet { max-height: none; border: 0; padding: 0; }

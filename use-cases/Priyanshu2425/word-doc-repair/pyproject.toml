@@ -3,15 +3,12 @@ name = "word-doc-repair"
 version = "1.0.0"
 description = "Best-effort recovery for a Word document that will not open."
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["lxml", "python-docx", "requests"]
 
 [project.optional-dependencies]
 web = ["fastapi", "uvicorn", "python-multipart"]
-# `httpx2` is what `starlette.testclient` drives the app with. It is listed
-# because leaving it out did not skip the endpoint tests -- it interrupted
-# collection, so `pip install -e ".[web,dev]" && pytest` ran *no* tests at all
-# for anybody following the README. See BUG-057.
-dev = ["pytest", "httpx2"]
+# `httpx` is what `starlette.testclient` drives the app with.
+dev = ["pytest", "httpx"]
 
 [build-system]
 requires = ["setuptools>=68"]

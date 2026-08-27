@@ -227,80 +227,68 @@ away behind a disclosure, because the answer outranks the working.</p>
   the heading. A heading with nothing under it is a claim.</p>
 </div>
 
-<h2><span class="n">4</span> &nbsp;The styled copy — the SuperDocs path</h2>
-<p class="goal">The card this build answers is banded <em>API + export</em>. This is where those four
-calls live, and the whole design question is how to offer a second, better-looking file without ever
-putting the first one at risk.</p>
+<h2><span class="n">4</span> &nbsp;The styling pass — the SuperDocs path</h2>
+<p class="goal">The card this build answers is banded <em>API + export</em>, and the brief defines a
+strong result as a valid, <em>styled</em> file. So the pass is not an offer beside the recovery — it
+is part of it. The design question stopped being “how do we offer a second file without risking the
+first” and became “how do we hand over the better file without ever losing the other one”.</p>
+
+<p class="rule"><b>Changed 2026-08-26.</b> There used to be a panel here headed <em>“A styled copy,
+if you want one”</em> with a <em>Send it for styling</em> button, and a <code>GET
+/api/capabilities</code> probe deciding whether to draw it. Both are gone. Styling runs inside the
+recovery, so there is nothing left to ask — only something to report. See BUG-097.</p>
 
 <div class="step">
-  <h3>Step 4 · the offer, below the download and never above it</h3>
-  <div class="screen">  ─────────────────────────────────────────────────────
-  A styled copy, if you want one
-
-  The file above is plain on purpose. The fonts and spacing
-  of your original could not be read out of a damaged file,
-  and this page will not guess at a design you had.
-  SuperDocs can lay the recovered headings, tables and
-  paragraphs out with consistent styling instead. It is told
-  to change no words, only how they are set. What comes back
-  is compared against what went out, word for word, and
-  thrown away if the wording moved at all…
-
-  [ Send it for styling ]
-
-  This sends the recovered text to SuperDocs. If you would
-  rather it stayed on this machine, the file above is
-  already yours and nothing more needs to happen.</div>
-  <p class="rule"><b>Check.</b> Nothing has been sent yet. Somebody whose document just broke should
-  not have it handed to a third party because a page decided that for them.</p>
-  <p class="rule"><b>Check.</b> The panel carries no chevron tape. Tape means <em>in our custody</em>,
-  and there is only one custody.</p>
-</div>
-
-<div class="step">
-  <h3>Step 4a · with no key configured</h3>
-  <p class="see">No button at all — one quiet line: <b>“Styling is switched off on this copy of the
-  page, so the rebuilt file is the plain one. Nothing else is affected.”</b></p>
-  <p class="rule"><b>Check.</b> The page asks <code>GET /api/capabilities</code> before it offers
-  anything. A step this copy cannot take is never rendered as a button that fails when pressed — and
-  the sentence says what is <em>not</em> affected, because a person reading a missing feature needs to
-  know their file is not the thing that went wrong.</p>
-</div>
-
-<div class="step">
-  <h3>Step 4b · press it and wait</h3>
-  <div class="screen">  ● Sending the recovered content to SuperDocs for styling…
-  ○ Waiting for SuperDocs to finish — large documents can
-    take minutes.
-
-  Still working. A long document can take a few minutes,
-  and a quiet wait is normal.   ▓▓▓▓▓▓░░░░░░░░</div>
+  <h3>Step 4 · it just happens, on the same progress stream</h3>
+  <div class="screen">  ● Reading the parts out of the file…
+  ● Checking the document body for damage…
+  ● Looking for pictures…
+  ● Rebuilding a clean Word file…
+  ● Sending the recovered document to SuperDocs…
+  ● Restoring heading styles, tables and spacing…
+  ● Exporting the styled file…
+  ● Styled file ready.</div>
+  <p class="rule"><b>Check.</b> The local stages and the remote ones are one list, in order, pushed as
+  each happens. A person watching this is watching one recovery — not a recovery followed by a
+  decision nobody told them they had to make.</p>
   <p class="rule"><b>Check.</b> Trap 2 from the docs, answered in the interface: a long silence is
-  still processing. Measured live at 27 seconds on a four-paragraph document. A page that does not
-  say this turns a slow success into a suspected crash.</p>
+  still processing. The line naming the current step is what makes that true for the person rather
+  than only true in the code.</p>
 </div>
 
 <div class="step step--end">
-  <h3>Step 4c · it worked</h3>
-  <div class="screen">  ● Sending the recovered content to SuperDocs for styling…
-  ● Waiting for SuperDocs to finish…
-  ● Approved 5 formatting change(s).
-  ● SuperDocs returned a styled file.
+  <h3>Step 4a · it worked</h3>
+  <div class="screen">  ┌─ ▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨ ─┐
+    [ Download the repaired file ]
+    Saved as local_rebuild.docx. You can download it more
+    than once. Your original was never changed.
 
-  ┌─ ▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨ ─┐
-    [ Download the styled file ]
-    Saved as …-repaired-styled.docx. It carries the same
-    recovered content as the file above, laid out with
-    consistent styling — it recovers nothing extra. That
-    cost 1 estimated operation. The plain file above is
-    untouched and still yours.
+    Styled through SuperDocs, which changed how your words
+    are set and not what they say.
+    Download the unstyled copy instead
   └─ ▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨▨ ─┘</div>
-  <p class="rule"><b>Check.</b> <em>Two</em> download buttons are now on the page. The styled copy is
-  an addition; it never replaces the file the person already had.</p>
-  <p class="rule"><b>Check.</b> “it recovers nothing extra” — a styled file looks better, and looking
-  better is easy to mistake for having recovered more.</p>
-  <p class="rule"><b>Check.</b> The cost is stated, and an unconfirmed number says <em>estimated</em>.
-  The async endpoints return no usage block, so a zero would mean “not reported”, not “free”.</p>
+  <p class="rule"><b>Check.</b> <em>One</em> download button, and it is the styled file. That is the
+  file this build promises.</p>
+  <p class="rule"><b>Check.</b> The unstyled rebuild is a link beside it, not a second button and not
+  a second run. Somebody who wants the plain file gets it in one click.</p>
+  <p class="rule"><b>Check.</b> “changed how your words are set and not what they say” — a styled file
+  looks better, and looking better is easy to mistake for having recovered more. It recovers nothing
+  extra, and the sentence has to say so.</p>
+  <p class="rule"><b>Check.</b> The pictures are in <em>both</em> files. The pass used to send HTML
+  with the images stripped out of it, so every styled file came back with none (BUG-094). It sends
+  the rebuilt <code>.docx</code> now, and the guard behind the call refuses anything that returns
+  with fewer.</p>
+</div>
+
+<div class="step">
+  <h3>Step 4b · with no key configured</h3>
+  <p class="see">The recovery runs to the end and the handover reads: <b>“This copy of the page has no
+  SuperDocs key set, so the file below is the plain rebuild. It is complete and it is yours; it just
+  has not been through the styling pass.”</b></p>
+  <p class="rule"><b>Check.</b> Nothing was sent and nothing failed. The sentence says what is
+  <em>not</em> affected, because a person reading about a missing feature needs to know their file is
+  not the thing that went wrong.</p>
+  <p class="rule"><b>Check.</b> No button appears and then fails. There is no button.</p>
 </div>
 
 <div class="step step--stop">
@@ -320,9 +308,9 @@ putting the first one at risk.</p>
 <div class="step step--stop">
   <h3>Step 4e · the other ways it can end</h3>
   <p class="see">Each ends with the plain file still on the page and one sentence saying why.</p>
-  <div class="screen">  No styled copy. There is no styling allowance left this
-  month, so nothing was sent and nothing was spent. The
-  rebuilt file is unchanged and still yours.
+  <div class="screen">  The SuperDocs styling allowance for this month is used up,
+  so nothing was sent and nothing was spent. The file below
+  is the plain rebuild and it is still yours.
 
   No styled copy. Styling did not work. The rebuilt file
   above is unchanged and still yours.

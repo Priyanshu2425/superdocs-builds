@@ -1,415 +1,847 @@
-"""The four-call contract: upload, edit instruction, approve, export.
+"""The styling pass: the path that produces the file the product promises.
 
-SHARED, AND VENDORED. This file is a byte-for-byte copy of
-`quota-aware-agent/quota_aware_agent/client.py` below this docstring, so each
-build stands alone in the builds repository.
+The brief for this build is explicit about what a strong result looks like — a
+reviewer runs a broken DOCX through the tool and "gets a valid, **styled** file
+back with a clear summary of what was recovered". So this is not a ceiling on
+top of the local rebuild; it is the main road. The local rebuild is what gets
+sent, and what the person still gets if this road is closed.
 
-Vendoring has a cost and this project paid it: the multipart fix for BUG-015
-landed in the original and not here, so Build B's styling path still sent an
-empty body and got a 422 long after Build A was working. `test_the_vendored
-_client_has_not_drifted` now fails the build if the two copies diverge.
+The call sequence, against the documented endpoints:
+
+  1. POST /v1/documents/upload   multipart file + session_id
+                                  -> loads the rebuilt .docx as the session's
+                                     active editable document. Parsing is not
+                                     billable; images are extracted to cloud
+                                     storage and referenced by URL, which is why
+                                     the pictures survive without a separate
+                                     image call.
+  2. POST /v1/chat               {message, session_id}
+                                  -> synchronous: the AI applies the edit inline
+                                     and the change is live on the session when
+                                     the call returns.
+  3. POST /v1/documents/export   {session_id, format:"docx"}
+                                  -> round-trips through the original docx
+                                     renderer, preserving tables, borders,
+                                     shading, headers, footers, fonts, inline
+                                     styling and embedded images.
+
+On the approval step
+--------------------
+The task brief names a four-call minimum contract: upload, chat, approve,
+export. This build makes three of them, deliberately and on the product owner's
+instruction: the synchronous `/v1/chat` endpoint applies its change inline, and
+the documented approval endpoint (`POST /v1/chat/{session_id}/approve`) exists
+only on the asynchronous `chat_async` path, reached by setting
+`approval_mode='ask_every_time'` and polling to `awaiting_approval`. Adding it
+would mean moving to the async flow purely to have something to approve. The
+decision recorded for this build is to trust the model on a formatting-only
+instruction and to verify the *result* instead — see `_why_not_acceptable`,
+which refuses a styled file that came back with fewer pictures or different
+words than the one that was sent. Verification after the fact is doing the work
+approval-before-the-fact would have done, on the thing that actually ships.
+
+Prompting for styling
+---------------------
+The instruction is bounded on purpose. This document was reconstructed from
+damage and its text is the only record of what its owner wrote, so the edit is
+allowed to change how it looks and nothing else.
 """
 
 from __future__ import annotations
 
-import json
-import time
+import logging
+import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from pathlib import Path
+
+import requests
 
 BASE = "https://api.superdocs.app"
 
-# Terminal and non-terminal job states, from the docs' job lifecycle.
-_TERMINAL = {"completed", "failed", "cancelled"}
-_NEEDS_HUMAN = "awaiting_approval"
+log = logging.getLogger("superdocs")
+
+#: The styling prompt, sent as `message` (the field the live SuperDocs chat
+#: endpoint accepts). Carried verbatim from the spec.
+INSTRUCTION = (
+    "Formatting only. This document was recovered from a damaged file and its "
+    "text is the only record of what its owner wrote. Normalize the formatting, "
+    "restore heading styles, and keep every table and every image exactly as "
+    "they are. Do NOT add, remove, expand, summarise, complete or reword any "
+    "text. Do not add sections, headings, rows, totals, placeholders, "
+    "disclaimers, signature blocks, headers, footers or dates. Do not fill "
+    "gaps. If a passage looks incomplete, leave it exactly as it is. The "
+    "word-for-word text of the output must be identical to the input. "
+    "Target max 25 sections."
+)
+
+REQUEST_TIMEOUT = 300.0
+
+#: The contract a conversational turn is wrapped in.
+#:
+#: This used to say "formatting only" and forbid adding, removing, expanding,
+#: summarising, completing or rewording anything -- the same bounded contract
+#: INSTRUCTION carries for the automatic pass. B20'' retired the refusal that
+#: matched it (owner, 2026-08-26), and an envelope still arguing against what
+#: the person just typed is worse than none: it makes the model hedge or
+#: half-comply on an instruction the owner decided is theirs to give.
+#:
+#: What it bounds now is scope, not permission. Do what was asked; do not do
+#: things that were not asked. That is the discipline worth keeping, because
+#: a model handed a sparse recovered document will otherwise helpfully fill
+#: it out -- observed on 2026-08-20, when a four-line report came back with
+#: invented paragraphs, a subtotal row, a disclaimer and a signature block
+#: that nobody had asked for.
+TURN_ENVELOPE = (
+    "This document was recovered from a damaged file, so its text is the "
+    "only surviving record of what its owner wrote. Treat it as precious: "
+    "never drop or replace content the request below does not ask you to "
+    "touch. Do exactly what the request asks, and nothing beyond it -- add "
+    "no sections, headings, rows, totals, placeholders, disclaimers, "
+    "signature blocks, headers, footers or dates that were not asked for. "
+    "If the request supplies exact words in quotes, use those words exactly "
+    "as given.\n\nThe person's request: {message}"
+)
+
+#: Async job polling: a small backoff, capped, against a generous overall
+#: budget -- async exists precisely so a turn that runs long survives past
+#: the ~300s the synchronous endpoint 504s at (PRD §6), so the budget here is
+#: wider than REQUEST_TIMEOUT rather than equal to it.
+JOB_POLL_INITIAL = 2.0
+JOB_POLL_MAX = 15.0
+JOB_POLL_BUDGET = 900.0
 
 
-class Transport(Protocol):
-    def request(self, method: str, path: str, **kw: Any) -> "Response": ...
+def _bounded_turn(message: str) -> str:
+    """Wrap a person's instruction in the same bounded contract INSTRUCTION
+    carries, so it goes out evaluated inside a boundary rather than as free
+    text the model could read as licence to write prose."""
+    return TURN_ENVELOPE.format(message=message)
 
 
 @dataclass
-class Response:
-    status: int
-    body: dict
-    headers: dict = field(default_factory=dict)
+class Allowance:
+    """The operations balance, and whether anybody actually read it."""
 
-    @property
-    def usage(self) -> dict:
-        """The usage block rides on every chat response. It is the only way to
-        read the balance from an API-key context -- the account usage endpoints
-        reject `sk_` keys with a 401."""
-        return self.body.get("usage", {}) or {}
+    known: bool = False
+    remaining: int = 0
+    tier: str = ""
 
 
-class SuperDocsError(RuntimeError):
-    def __init__(self, status: int, body: Any) -> None:
-        super().__init__(f"SuperDocs returned {status}: {body}")
-        self.status = status
-        self.body = body
+@dataclass
+class Styling:
+    """What the styling pass produced, and what to tell the person if nothing."""
+
+    ok: bool = False
+    output: bytes = b""
+    #: One sentence, consumer-facing. Set on every path, success or not.
+    note: str = ""
+    stages: list = field(default_factory=list)
+    #: Set when a styled file came back and was thrown away because its text or
+    #: its pictures no longer matched. Kept apart from a transport failure: one
+    #: is nobody's fault, the other is a claim we refused to pass on.
+    rejected_for_content: bool = False
+    ops_charged: int = 0
+    allowance_known: bool = False
+    allowance_remaining: int = 0
+    #: The SuperDocs session this pass ran on. Minted the moment it exists,
+    #: so a conversation can continue on the same document -- even on a
+    #: later failure path, since the session itself may still be usable.
+    session_id: str = ""
 
 
-class QuotaExhausted(SuperDocsError):
-    """Raised only when the platform says so. Never inferred from our own count."""
+@dataclass
+class Turn:
+    """What one conversational instruction produced, and what to tell the
+    person if nothing. Same discipline as `Styling`: every path, success or
+    not, leaves `note` set to one consumer-facing sentence."""
+
+    ok: bool = False
+    output: bytes = b""              # the exported .docx after this turn
+    note: str = ""                   # one consumer-facing sentence, set on EVERY path (B21)
+    rejected_for_content: bool = False
+    turn_index: int | None = None    # of the user message, for a later revert
+    reconciled: bool = False         # True when recovered from a timeout rather than a clean reply
+    stages: list = field(default_factory=list)
+    # No operation count and no allowance here. The counter does not report
+    # what it costs us: somebody whose file broke this morning did not arrive
+    # with an account, and a number describing our metering is not something
+    # they can act on. The allowance is still read before anything is sent
+    # (B22) -- it decides whether to send, and says nothing further.
 
 
-class TransportFailure(RuntimeError):
-    """The call did not produce a response, and we have to say which kind.
+@dataclass
+class Reverted:
+    """What a native revert produced."""
 
-    The distinction is the whole point. A connection that was refused means the
-    request never reached SuperDocs and cannot have been billed, so a rerun may
-    safely repeat it. A read that timed out means the request very possibly did
-    reach SuperDocs, was charged, and applied an edit -- we simply never heard
-    the answer. Collapsing the two into "it failed" is how a retry pays twice.
-    """
-
-    def __init__(self, message: str, *, never_sent: bool) -> None:
-        super().__init__(message)
-        self.never_sent = never_sent
-
-
-def provably_never_sent(exc: BaseException) -> bool:
-    """True only when the request cannot have been billed.
-
-    Deliberately conservative: the default answer is "we do not know", because
-    the cost of wrongly believing a call was billed is one step reported to a
-    person, and the cost of wrongly believing it was not is the user paying
-    twice and possibly getting the same edit applied twice.
-    """
-    import socket
-
-    if isinstance(exc, TransportFailure):
-        return exc.never_sent
-    if isinstance(exc, QuotaExhausted):
-        # The request that carried this signal completed; it was answered.
-        return False
-    if isinstance(exc, SuperDocsError):
-        # A 4xx was rejected before any work happened, so it was not billed.
-        # A 5xx may have come from a gateway that had already passed the
-        # request on, so it proves nothing.
-        return exc.status < 500
-    reason = getattr(exc, "reason", exc)
-    return isinstance(reason, (ConnectionRefusedError, socket.gaierror))
-
-
-def _encode_multipart(files: dict, fields: dict) -> tuple[bytes, str]:
-    """Build a multipart/form-data body from {name: (filename, bytes)} plus
-    plain fields. Returns (body, content_type).
-
-    A fixed boundary would collide with content that happens to contain it, so
-    it is derived from the payload -- deterministic for a given body, which
-    keeps requests reproducible, and vanishingly unlikely to appear inside it.
-    """
-    import hashlib
-
-    digest = hashlib.sha256()
-    for name, (filename, content) in sorted(files.items()):
-        digest.update(name.encode())
-        digest.update(str(filename).encode())
-        digest.update(content if isinstance(content, bytes) else str(content).encode())
-    boundary = "----formdata" + digest.hexdigest()[:24]
-
-    out = bytearray()
-    for name, value in fields.items():
-        out += f"--{boundary}\r\n".encode()
-        out += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
-        out += str(value).encode("utf-8") + b"\r\n"
-    for name, (filename, content) in files.items():
-        if isinstance(content, str):
-            content = content.encode("utf-8")
-        out += f"--{boundary}\r\n".encode()
-        out += (f'Content-Disposition: form-data; name="{name}"; '
-                f'filename="{filename}"\r\n').encode()
-        out += f"Content-Type: {_guess_type(filename)}\r\n\r\n".encode()
-        out += content + b"\r\n"
-    out += f"--{boundary}--\r\n".encode()
-    return bytes(out), f"multipart/form-data; boundary={boundary}"
-
-
-def _guess_type(filename: str) -> str:
-    import mimetypes
-
-    return mimetypes.guess_type(str(filename))[0] or "application/octet-stream"
-
-
-class HttpTransport:
-    """Real transport. Imported lazily so the package needs no HTTP library
-    installed to run its tests."""
-
-    def __init__(self, api_key: str, base: str = BASE, timeout: float = 300.0) -> None:
-        self._key = api_key
-        self._base = base
-        # ~300s is the platform gateway timeout for synchronous requests.
-        self._timeout = timeout
-
-    def request(self, method: str, path: str, **kw: Any) -> Response:
-        import urllib.error
-        import urllib.request
-
-        url = self._base + path
-        headers = {"Authorization": f"Bearer {self._key}"}
-        data = None
-        if "files" in kw:
-            # Upload is multipart/form-data, not JSON. Encoded here rather than
-            # with a library because this package has no dependencies -- and
-            # because getting it wrong is invisible: the request still sends,
-            # and the API answers 422 for a field it never received.
-            data, content_type = _encode_multipart(kw["files"], kw.get("data", {}))
-            headers["Content-Type"] = content_type
-        elif "json" in kw:
-            data = json.dumps(kw["json"]).encode()
-            headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as r:
-                raw = r.read()
-                body = json.loads(raw) if raw and r.headers.get_content_type() == "application/json" else {"raw": raw}
-                return Response(r.status, body, dict(r.headers))
-        except urllib.error.HTTPError as e:
-            raw = e.read()
-            try:
-                body = json.loads(raw)
-            except Exception:
-                body = {"raw": raw.decode(errors="replace")}
-            return Response(e.code, body, dict(e.headers or {}))
-        except urllib.error.URLError as e:
-            # Name the cause and the fix, and -- more importantly -- say whether
-            # the request could have been billed, so the ledger can record the
-            # truth rather than the convenient answer.
-            never_sent = provably_never_sent(e)
-            raise TransportFailure(
-                f"could not reach {self._base} ({e.reason}). "
-                + ("The connection was refused or the host did not resolve, so "
-                   "the request never reached SuperDocs and was not billed — "
-                   "check network access to api.superdocs.app and retry."
-                   if never_sent else
-                   "It is not known whether the request arrived, so it must not "
-                   "be assumed unbilled — rerun and read what the operation "
-                   "ledger reports about it."),
-                never_sent=never_sent,
-            ) from e
-        except TimeoutError as e:
-            # A read timeout is the ambiguous case by definition: the request
-            # went out and the answer never came back.
-            raise TransportFailure(
-                f"no response from {self._base} within {self._timeout:.0f}s. "
-                "SuperDocs may still be processing this — large documents and "
-                "the deepest model settings take minutes — so the request may "
-                "well have been accepted and billed. It is recorded as started "
-                "and unconfirmed rather than retried.",
-                never_sent=False,
-            ) from e
-
-
-#: What the upload endpoint parses each extension as. Verified against the live
-#: API 2026-08-20: the **filename decides the parser**, not the bytes. HTML sent
-#: as `report.docx` is answered `400 Invalid DOCX file: File is not a zip file`,
-#: and the same bytes as `report.html` are accepted. `.txt` is accepted too and
-#: parses the markup as literal text, which is worse than an error because it
-#: succeeds.
-_ZIP_EXTENSIONS = {".docx", ".xlsx", ".pptx", ".odt"}
-_PDF_EXTENSIONS = {".pdf"}
-_TEXT_EXTENSIONS = {".html", ".htm", ".txt", ".md", ".markdown", ".rtf"}
-
-
-def check_upload_name(filename: str, content: bytes) -> None:
-    """Refuse a filename whose extension disagrees with the bytes.
-
-    This is a deliberate hardcoded defence sitting in front of the intelligent
-    path, not a guess about what the caller meant. The live API decides how to
-    parse an upload from the extension alone, so `agent.run(..., "contract.docx",
-    html_bytes)` reads perfectly and fails at the platform with a message about
-    zip files, which names neither the cause nor the fix. Worse, the mismatch
-    that does NOT error — HTML uploaded as `.txt` — succeeds and quietly parses
-    the markup as literal text, and nobody finds out until the export.
-
-    So it is checked here, before anything is sent, and the error says which
-    two things disagreed and both ways to make them agree.
-    """
-    import os
-
-    ext = os.path.splitext(str(filename))[1].lower()
-    if not ext:
-        raise ValueError(
-            f"'{filename}' has no file extension. SuperDocs chooses how to parse "
-            "an upload from the extension, so give one — '.html' for HTML, "
-            "'.docx' for a Word file, '.pdf' for a PDF.")
-
-    looks_like_zip = content[:4] == b"PK\x03\x04"
-    looks_like_pdf = content[:4] == b"%PDF"
-
-    if ext in _ZIP_EXTENSIONS and not looks_like_zip:
-        raise ValueError(
-            f"'{filename}' is named as a Word-family file but the bytes are not "
-            "a zip archive, and SuperDocs parses uploads by extension — it would "
-            "answer '400 Invalid DOCX file: File is not a zip file'. Either send "
-            "the real .docx bytes, or rename this to '.html' if it is HTML.")
-    if ext in _PDF_EXTENSIONS and not looks_like_pdf:
-        raise ValueError(
-            f"'{filename}' is named as a PDF but the bytes do not begin with "
-            "'%PDF'. Send the real PDF bytes, or rename it to match what it is.")
-    if ext in _TEXT_EXTENSIONS and (looks_like_zip or looks_like_pdf):
-        raise ValueError(
-            f"'{filename}' is named as text but the bytes are a "
-            f"{'zip archive (a .docx, most likely)' if looks_like_zip else 'PDF'}. "
-            "This would be accepted and parsed as literal text rather than as a "
-            "document — rename it to match its contents.")
-
-
-def pending_changes(job_body: dict) -> list[dict]:
-    """Read the proposed changes off a job, whatever shape they arrive in.
-
-    Two shapes exist and both are real:
-      * `GET /v1/jobs/{id}` returns `metadata.pending_changes` as a plain LIST
-        of change dicts. Verified against the live API 2026-08-19.
-      * The SSE `proposed_change_batch` event delivers an envelope whose
-        `content` is a JSON-encoded STRING needing a second parse.
-
-    This lives in the client because both builds need it, and the copy that had
-    it written separately handled only the envelope -- so it crashed on the
-    shape the polling path actually returns.
-    """
-    meta = job_body.get("metadata") or {}
-    pending = meta.get("pending_changes")
-    if pending is None:
-        for event in meta.get("intermediate_responses", []) or []:
-            if event.get("type") == "proposed_change_batch":
-                return parse_proposed_changes(event)
-        return []
-    if isinstance(pending, list):
-        return list(pending)
-    if isinstance(pending, str):
-        return parse_proposed_changes({"content": pending})
-    return parse_proposed_changes(pending)
-
-
-def parse_proposed_changes(envelope: dict) -> list[dict]:
-    """Trap 1. The batch arrives as a JSON string inside `content`.
-
-    A single-change turn still arrives as a one-element `changes[]`, so this
-    always returns a list and never special-cases the singular form.
-    """
-    content = envelope.get("content")
-    if content is None:
-        return list(envelope.get("changes", []))
-    batch = json.loads(content) if isinstance(content, str) else content
-    return list(batch.get("changes", []))
+    ok: bool = False
+    note: str = ""
+    compose_text: str = ""           # the instruction that was undone, to refill the field
+    reverted_to_turn: int = -1
+    archived_turn_count: int = 0
 
 
 class SuperDocsClient:
-    def __init__(self, transport: Transport, sleep: Callable[[float], None] = time.sleep) -> None:
-        self._t = transport
-        self._sleep = sleep
-        #: Set once the platform has said the allowance is exhausted, including
-        #: when it said so on a free call that was allowed to complete anyway.
-        self.quota_exhausted = False
+    """A thin wrapper that performs upload -> instruct -> export."""
 
-    def _check(self, r: Response, *, billable: bool = True) -> Response:
-        """Raise on an error, and on the platform's own exhaustion signal.
+    def __init__(self, api_key: str | None = None) -> None:
+        self.api_key = api_key or os.environ.get("SUPERDOCS_API_KEY")
 
-        `billable=False` marks the free calls -- whoami and export. An exhausted
-        allowance must not stop those: exports and downloads never cost
-        operations, and the reserve exists precisely to promise that the work
-        already done can still be exported. Raising here would break that
-        promise at the exact moment it matters, turning "you always end up with
-        a file" into "you end up with a session and an exception". The signal is
-        still recorded, so the caller stops spending; it just does not block a
-        call that costs nothing.
+    def style(self, sent: bytes, filename: str = "recovered.docx",
+              on_progress=None) -> "Styling":
+        """Upload, instruct, export. Never raises to its caller.
+
+        Takes the rebuilt bytes rather than a path: the engine already holds
+        them, and re-reading a file it just wrote is a second chance to read
+        something else.
+
+        Every failure returns `ok=False` with a sentence a non-engineer can act
+        on. The caller still has the local rebuild, so a failure here degrades
+        to "you get the plain file, and here is why" rather than to "you get
+        nothing".
         """
-        if r.status >= 400:
-            raise SuperDocsError(r.status, r.body)
-        if r.usage.get("quota_exhausted"):
-            # The current request still completed; further billable ones will not.
-            self.quota_exhausted = True
-            if billable:
-                raise QuotaExhausted(r.status, r.body)
+        import uuid
+
+        r = Styling()
+
+        def say(msg: str) -> None:
+            r.stages.append(msg)
+            if on_progress:
+                on_progress("Styling", msg)
+
+        if not self.api_key:
+            r.note = (
+                "This copy of the page has no SuperDocs key set, so the file "
+                "below is the plain rebuild. It is complete and it is yours; "
+                "it just has not been through the styling pass."
+            )
+            log.info("SUPERDOCS_API_KEY is not set; keeping the local rebuild.")
+            return r
+
+        try:
+            # 0 -- the allowance, before a single billable call. Documented as
+            # "useful before doing work (to confirm you have operations left)",
+            # and reads are free. Starting a pass that cannot finish would leave
+            # somebody watching a progress line for work refused at the far end.
+            left = self.allowance()
+            r.allowance_known, r.allowance_remaining = left.known, left.remaining
+            if left.known and left.remaining < 1:
+                r.note = (
+                    "The SuperDocs styling allowance for this month is used up, "
+                    "so nothing was sent and nothing was spent. The file below "
+                    "is the plain rebuild and it is still yours."
+                )
+                say(r.note)
+                return r
+
+            session_id = f"salvage-{uuid.uuid4().hex}"
+            r.session_id = session_id
+
+            say("Sending the recovered document to SuperDocs…")
+            self._upload_bytes(sent, filename, session_id)
+
+            # The docs warn that a first request in a fresh session can take
+            # from thirty seconds to several minutes with no visible progress on
+            # a large document. That is still processing, not a crash, and the
+            # line above is what the person watching it needs to see.
+            say("Restoring heading styles, tables and spacing…")
+            self._instruct(session_id)
+
+            say("Exporting the styled file…")
+            got = self.export(session_id)
+            if not got:
+                r.note = ("SuperDocs returned no file, so the plain rebuild "
+                          "below is what you get. Nothing was lost.")
+                say(r.note)
+                return r
+
+            refusal = _why_not_acceptable(sent, got)
+            if refusal:
+                # Checked rather than trusted, because the styled file is the
+                # one offered as better and so is the one that must not quietly
+                # be worse. A recovered document handed back with the pictures
+                # missing, or with sentences its owner never wrote, is a
+                # downgrade wearing better formatting.
+                r.rejected_for_content = True
+                r.note = (
+                    "The styled version came back " + refusal + ", so it was "
+                    "thrown away rather than handed over. Your document should "
+                    "say what you wrote. The plain rebuild below is unchanged "
+                    "and still yours."
+                )
+                say(r.note)
+                log.warning("SuperDocs styling rejected (%s)", refusal)
+                return r
+
+            r.output = got
+            r.ok = True
+            r.ops_charged = 1        # one document-modifying chat turn
+            r.note = "SuperDocs returned a styled file."
+            say("Styled file ready.")
+            return r
+
+        except requests.Timeout:
+            r.note = ("SuperDocs did not answer in time. The plain rebuild "
+                      "below is unchanged and still yours — you can try the "
+                      "styling again on a fresh run.")
+        except Exception as exc:  # noqa: BLE001 -- never escape the styling pass
+            # Deliberately no exception class name: this string reaches a person.
+            log.warning("SuperDocs styling failed (%s)", exc)
+            r.note = ("The styling pass did not work this time, so the file "
+                      "below is the plain rebuild. It is complete and it is "
+                      "yours.")
+        say(r.note)
         return r
 
-    # --- call 0: the one authoritative balance read available to an agent key.
-    def whoami(self) -> Response:
-        # Free, and it is the call that tells you the allowance is gone. Being
-        # refused by the exhaustion it exists to report would be absurd.
-        return self._check(self._t.request("GET", "/v1/agents/whoami"),
-                           billable=False)
+    def styled_export(self, filepath: str) -> str:
+        """Path-in, path-out wrapper kept for callers that hold a file.
 
-    # --- call 1 of the contract: upload.
-    def upload(self, session_id: str, filename: str, content: bytes) -> Response:
-        check_upload_name(filename, content)
-        return self._check(
-            self._t.request(
-                "POST", "/v1/documents/upload",
-                files={"file": (filename, content)}, data={"session_id": session_id},
-            )
-        )
-
-    # --- call 2: the edit instruction.
-    def edit(self, session_id: str, message: str, approval_mode: str = "ask_every_time") -> Response:
-        return self._check(
-            self._t.request(
-                "POST", "/v1/chat/async",
-                json={"session_id": session_id, "message": message, "approval_mode": approval_mode},
-            )
-        )
-
-    def job(self, job_id: str) -> Response:
-        return self._check(self._t.request("GET", f"/v1/jobs/{job_id}"))
-
-    def poll_job(self, job_id: str, deadline_s: float = 600.0, interval_s: float = 2.0,
-                 on_wait: Callable[[float, str], None] | None = None) -> Response:
-        """Trap 2. Silence is still processing.
-
-        Returns as soon as the job is terminal *or* is waiting on a human. Gives
-        up only at an explicit deadline, and says how long it waited -- a slow
-        job is never reported as a crash.
+        Returns the styled file's path on success, or `filepath` unchanged on
+        any failure, exactly as before.
         """
-        waited = 0.0
-        while True:
-            r = self.job(job_id)
-            status = r.body.get("status", "")
-            if status in _TERMINAL or status == _NEEDS_HUMAN:
-                return r
-            if waited >= deadline_s:
-                raise TimeoutError(
-                    f"job {job_id} was still '{status}' after {waited:.0f}s. "
-                    "That is a deadline this client imposed, not a platform failure -- "
-                    "the job may still be running."
-                )
-            if on_wait:
-                on_wait(waited, status)
-            self._sleep(interval_s)
-            waited += interval_s
+        path = Path(filepath)
+        r = self.style(path.read_bytes(), path.name)
+        if not r.ok:
+            return str(path)
+        out = path.with_name("final_recovered.docx")
+        out.write_bytes(r.output)
+        return str(out)
 
-    # --- call 3: approve, item by item.
-    def approve(self, session_id: str, job_id: str, decisions: list[dict]) -> Response:
-        """`decisions` is a list of {change_id, approved, feedback?}. Sent as a
-        batch so a mixed approve/deny turn is one request, not one per change."""
-        return self._check(
-            self._t.request(
-                "POST", f"/v1/chat/{session_id}/approve",
-                json={"job_id": job_id, "approved": True, "changes": decisions},
-            )
-        )
+    def allowance(self) -> "Allowance":
+        """What the platform says is left, before anything is spent.
 
-    # --- call 4: export. Free, per the docs, and so never priced.
-    def export(self, session_id: str, fmt: str = "docx") -> Response:
-        """Free per the docs, so an exhausted allowance never blocks it."""
-        return self._check(
-            self._t.request("POST", "/v1/documents/export",
-                            json={"session_id": session_id, "format": fmt}),
-            billable=False,
-        )
-
-    @staticmethod
-    def export_warnings(r: Response) -> list:
-        """Exports can succeed with non-fatal issues, carried base64-encoded in
-        `X-Export-Warnings`. Surfaced rather than swallowed -- a dropped field
-        code is exactly the kind of thing a user should be told about."""
-        import base64
-
-        header = r.headers.get("X-Export-Warnings")
-        if not header:
-            return []
+        `known` is false when the balance could not be read. That is not the
+        same as zero and is never reported as one: an unreadable balance lets
+        the work proceed and says the number is unknown, because refusing on a
+        number nobody read would be its own kind of bluff.
+        """
         try:
-            return json.loads(base64.b64decode(header))
-        except Exception:
+            resp = requests.get(f"{BASE}/v1/agents/whoami",
+                                headers=self._headers(), timeout=30)
+            resp.raise_for_status()
+            quota = (resp.json() or {}).get("quota") or {}
+            if "remaining" not in quota:
+                return Allowance()
+            return Allowance(known=True, remaining=int(quota["remaining"]),
+                             tier=str(quota.get("tier", "")))
+        except Exception:  # noqa: BLE001 -- an unread balance is not a zero one
+            return Allowance()
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.api_key}"}
+
+    def _upload_bytes(self, blob: bytes, filename: str, session_id: str) -> None:
+        """Load the rebuilt document as the session's active editable document.
+
+        Sent as a file, which is the documented contract: SuperDocs takes
+        documents and HTML, and there is no endpoint for raw Word XML. Uploading
+        the `.docx` is also what carries the pictures — the upload path extracts
+        images to cloud storage and the export preserves them, so they survive
+        without a separate image call.
+        """
+        import io
+
+        resp = requests.post(
+            f"{BASE}/v1/documents/upload",
+            headers=self._headers(),
+            files={"file": (filename, io.BytesIO(blob))},
+            data={"session_id": session_id},
+            timeout=REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+
+    def _upload(self, filepath: str, session_id: str) -> None:
+        # Loads the local rebuild as the session's active, editable document.
+        # Synchronous: the response returns the parsed HTML and the session_id.
+        path = Path(filepath)
+        with path.open("rb") as fh:
+            resp = requests.post(
+                f"{BASE}/v1/documents/upload",
+                headers=self._headers(),
+                files={"file": (path.name, fh)},
+                data={"session_id": session_id},
+                timeout=REQUEST_TIMEOUT,
+            )
+        resp.raise_for_status()
+
+    def _instruct(self, session_id: str) -> None:
+        # Synchronous chat: the AI normalizes/restyles the session's document and
+        # applies the change immediately (auto-approve). No approval step required.
+        requests.post(
+            f"{BASE}/v1/chat",
+            headers=self._headers(),
+            json={"message": INSTRUCTION, "session_id": session_id},
+            timeout=REQUEST_TIMEOUT,
+        ).raise_for_status()
+
+    def export(self, session_id: str) -> bytes | None:
+        """The session's current document, as `.docx` bytes. Free (PRD §7)."""
+        resp = requests.post(
+            f"{BASE}/v1/documents/export",
+            headers=self._headers(),
+            json={"session_id": session_id, "format": "docx"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.content or None
+
+    def _export(self, session_id: str) -> bytes | None:
+        # Kept as a thin alias: `export` is the public name now, but this
+        # name stayed in case anything outside this file still reaches for
+        # it directly.
+        return self.export(session_id)
+
+    # -- the conversation ------------------------------------------------
+
+    def open_session(self, rebuild: bytes, filename: str = "recovered.docx") -> str:
+        """Mint a session and load the rebuild into it as the active
+        document, so a conversation can continue turn after turn on the
+        same file.
+
+        Never raises: a caller only ever gets back an id it can hold a
+        conversation on. If the upload itself does not take, the first turn
+        sent on this session will not find its edit landing, and
+        reconciliation there is what surfaces it -- retrying the upload
+        blindly here would carry the same double-billing risk `turn` is
+        built to avoid, except spent on an upload rather than an edit.
+        """
+        import uuid
+
+        session_id = f"salvage-{uuid.uuid4().hex}"
+        try:
+            self._upload_bytes(rebuild, filename, session_id)
+        except Exception as exc:  # noqa: BLE001 -- never raise on session open
+            log.warning("SuperDocs session open failed to upload (%s)", exc)
+        return session_id
+
+    def turn(self, session_id: str, message: str, *, sent: bytes,
+             authorised, on_progress=None) -> "Turn":
+        """One conversational instruction, applied and verified.
+
+        Goes over the asynchronous chat endpoint (PRD §6): synchronous
+        `/v1/chat` 504s past about 300 seconds, and there is no idempotency
+        key on a billable write, so a turn that cannot be confirmed is
+        reconciled against the session's own document version rather than
+        ever resent. `approval_mode` is never set -- edits auto-apply, and
+        the job must never reach `awaiting_approval`.
+
+        `sent` is the version this turn started from (for the picture
+        count) and `authorised` is the authorised word baseline (PRD §3) the
+        guard checks the result against. Never raises -- every path returns
+        a populated `Turn` with a note a non-engineer can act on.
+        """
+        r = Turn()
+
+        def say(msg: str) -> None:
+            r.stages.append(msg)
+            if on_progress:
+                on_progress("Styling", msg)
+
+        # The free "did my edit land?" signal for reconciliation is the
+        # session's document version id (`_version_id`, via the free
+        # history read) -- it moves exactly when an edit lands and needs no
+        # id resolution. `structure` is the documented "did my edit land"
+        # read too, but it needs a durable document id resolved first
+        # (`_durable_document_id`), so it stays a correct public helper
+        # rather than the thing on this hot path.
+        before_version = self._version_id(session_id)
+
+        try:
+            say("Sending your change to SuperDocs…")
+            resp = requests.post(
+                f"{BASE}/v1/chat/async",
+                headers=self._headers(),
+                json={"session_id": session_id, "message": _bounded_turn(message),
+                      "response_mode": "compact"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            job_id = (resp.json() or {}).get("job_id")
+            if not job_id:
+                raise ValueError("no job id in the response")
+
+            say("Applying your change…")
+            body = self._await_job(job_id, say)
+            status = (body or {}).get("status")
+
+            if status == "completed":
+                result = (body or {}).get("result") or {}
+                turn_index = ((body or {}).get("metadata") or {}).get(
+                    "user_turn_index_pre_inserted")
+                self._finish_turn(r, session_id, sent, authorised, say,
+                                  turn_index=turn_index,
+                                  document_changes=result.get("document_changes"))
+                return r
+
+            # A definitive no from the platform -- failed or cancelled -- is
+            # not ambiguous, so there is nothing to reconcile: the edit did
+            # not land.
+            r.note = ("SuperDocs could not apply that change, so your "
+                      "document is unchanged. You can try again.")
+            say(r.note)
+            return r
+
+        except Exception as exc:  # noqa: BLE001 -- never raise out of a turn
+            # Timeout, 5xx, an unreadable job: never resend. Reconcile
+            # against the session's own document version instead.
+            log.warning("SuperDocs turn could not be confirmed (%s)", exc)
+            self._reconcile_turn(r, session_id, before_version, sent,
+                                 authorised, say)
+            return r
+
+    def _await_job(self, job_id: str, say) -> dict | None:
+        """Poll a chat job to a terminal state, with a small backoff. Emits a
+        progress line while it runs (B5: stages are real, not simulated).
+        Raises on a poll failure or a budget overrun -- caught by `turn`,
+        which reconciles rather than resending."""
+        import time
+
+        delay = JOB_POLL_INITIAL
+        deadline = time.monotonic() + JOB_POLL_BUDGET
+        while True:
+            resp = requests.get(f"{BASE}/v1/jobs/{job_id}",
+                                headers=self._headers(), timeout=30)
+            resp.raise_for_status()
+            body = resp.json() or {}
+            status = body.get("status")
+            if status in ("completed", "failed", "cancelled"):
+                return body
+            if status == "awaiting_approval":
+                # Should never happen -- approval_mode is never set on this
+                # path. Treated as unreadable rather than trusted, and the
+                # job is asked to stop rather than left running unattended.
+                try:
+                    requests.post(f"{BASE}/v1/jobs/{job_id}/cancel",
+                                 headers=self._headers(), timeout=30)
+                except Exception:  # noqa: BLE001
+                    pass
+                raise TimeoutError("job asked for approval unexpectedly")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("job poll exceeded its budget")
+            progress = body.get("progress")
+            say("Still applying your change…" +
+                (f" {progress}%" if isinstance(progress, int) else ""))
+            time.sleep(delay)
+            delay = min(delay * 2, JOB_POLL_MAX)
+
+    def _reconcile_turn(self, r: "Turn", session_id: str, before_version,
+                        sent: bytes, authorised, say) -> None:
+        """PRD §6: never blind-retry. Compare the session's document version
+        id -- free, via `history` -- and only treat the edit as landed when
+        it demonstrably moved. An unreadable id, before or after, is not
+        evidence either way, so it is never read as "unchanged"."""
+        after_version = self._version_id(session_id)
+        if before_version is None or after_version is None:
+            r.note = ("That change did not come back in time, and "
+                      "SuperDocs cannot be reached to check whether it "
+                      "landed. Nothing has been sent again; check back "
+                      "before trying once more.")
+            say(r.note)
+            return
+        if after_version == before_version:
+            r.note = ("That change did not come back in time, and "
+                      "checking your document shows nothing changed. You "
+                      "can send it again.")
+            say(r.note)
+            return
+        r.reconciled = True
+        self._finish_turn(r, session_id, sent, authorised, say,
+                          reconciled=True)
+
+    def _finish_turn(self, r: "Turn", session_id: str, sent: bytes, authorised,
+                     say, *, reconciled: bool = False,
+                     turn_index: int | None = None,
+                     document_changes=None) -> None:
+        """Export, guard, and populate a landed edit's `Turn` -- shared by
+        the clean-completion path and the reconcile path, since both end the
+        same way once the edit is known to have landed."""
+        from . import counter as _counter
+
+        say("Exporting the changed file…")
+        got = self.export(session_id)
+        if not got:
+            r.note = ("SuperDocs changed your document but did not send the "
+                      "file back, so what you can download here is unchanged.")
+            say(r.note)
+            return
+
+        # Nothing is refused here for changing the wording. At the counter
+        # the person asked for it, and the owner's decision on 2026-08-26 is
+        # that what they ask for is theirs to ask (B20''). The automatic pass
+        # is unchanged and still refuses -- that is where the model acts with
+        # nobody watching.
+        #
+        # It is still said. A turn that quietly removed seventy-three words
+        # would be the silence this build has never allowed, whatever the
+        # refusal rules are.
+        changed = _counter.describe_change(sent, got, authorised)
+
+        r.ok = True
+        r.output = got
+        # The job hands back the user message's own turn index; only the
+        # reconcile path -- which never sees a job body -- falls back to
+        # reading it from history.
+        r.turn_index = (int(turn_index) if turn_index is not None
+                        else self._last_turn_index(session_id))
+        r.note = self._turn_receipt(document_changes, changed,
+                                    reconciled=reconciled)
+        say(r.note)
+
+    def _turn_receipt(self, document_changes, changed: str, *,
+                      reconciled: bool) -> str:
+        """One consumer-facing sentence for a landed edit.
+
+        Uses the compact per-section diff when SuperDocs sent one, so the
+        receipt names that something specific changed rather than only that
+        the turn landed -- and adds what it did to the words when that is
+        not nothing. A person who asks for a formatting change and gets
+        seventy-three words fewer should be told in the same breath as being
+        told it worked.
+        """
+        prefix = ("That change took longer than expected, but it landed."
+                 if reconciled else "SuperDocs applied your change.")
+        if isinstance(document_changes, list) and document_changes:
+            count = len(document_changes)
+            noun = "section" if count == 1 else "sections"
+            prefix = f"{prefix} {count} {noun} changed."
+        if changed:
+            prefix = f"{prefix} Also {changed}."
+        return prefix
+
+    def _history_body(self, session_id: str) -> dict | None:
+        """Raw read of `GET /v1/sessions/{id}/history` --
+        `{document_state, editor_action, messages, restore_error,
+        session_id}`. Free. `None` when it could not be read."""
+        try:
+            resp = requests.get(
+                f"{BASE}/v1/sessions/{session_id}/history",
+                headers=self._headers(),
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json() or {}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("SuperDocs history read failed (%s)", exc)
+            return None
+
+    def _version_id(self, session_id: str) -> str | None:
+        """The session's current document version id
+        (`document_state.version_id`), which moves exactly when an edit
+        lands. `None` when the history read failed -- not the same as
+        "unchanged", and callers must not treat it as one."""
+        body = self._history_body(session_id)
+        if body is None:
+            return None
+        return (body.get("document_state") or {}).get("version_id")
+
+    def document_html(self, session_id: str) -> str:
+        """SuperDocs' own rendering of the session's document, with the
+        formatting still on it.
+
+        This is what the page shows after a turn, and it has to be, because
+        the alternative does not work: rebuilding the preview from the
+        exported `.docx` goes through `docx.blocks_to_html`, which carries
+        structure and text and no formatting at all. Ask for smaller headings
+        and that preview comes back byte-identical -- the change is real, in
+        the file, and invisible on the screen. A page that cannot show the
+        change it just made is worse than one that never offered to.
+
+        Free (a history read). Empty string when it could not be read, which
+        costs the preview and never the turn.
+        """
+        body = self._history_body(session_id)
+        if body is None:
+            return ""
+        return (body.get("document_state") or {}).get("html_content") or ""
+
+    def _last_turn_index(self, session_id: str) -> int | None:
+        body = self._history_body(session_id)
+        entries = (body or {}).get("messages") or []
+        if not entries:
+            return None
+        idx = entries[-1].get("turn_index")
+        return int(idx) if idx is not None else None
+
+    def revert(self, session_id: str, turn_index: int) -> "Reverted":
+        """Undo the given user turn and its edit together -- native revert,
+        not a re-upload, because SuperDocs restores the conversation and the
+        document as one unit (PRD §8). Free; the turn cap is the only limit
+        on how often this can be pressed. Never raises.
+        """
+        r = Reverted()
+        try:
+            resp = requests.post(
+                f"{BASE}/v1/sessions/{session_id}/revert",
+                headers=self._headers(),
+                json={"turn_index": turn_index},
+                timeout=30,
+            )
+            if resp.status_code == 409:
+                r.note = ("That change is still going through. You can put "
+                          "it back once it has landed.")
+                return r
+            if resp.status_code == 422:
+                r.note = ("That change is too old for SuperDocs to undo on "
+                          "its own, so nothing was changed here.")
+                return r
+            resp.raise_for_status()
+            body = resp.json() or {}
+            r.ok = True
+            r.compose_text = str(body.get("compose_text", "") or "")
+            r.reverted_to_turn = int(body.get("reverted_to_turn", -1))
+            r.archived_turn_count = int(body.get("archived_turn_count", 0) or 0)
+            r.note = "That change has been put back."
+            return r
+        except Exception as exc:  # noqa: BLE001 -- never raise out of a revert
+            log.warning("SuperDocs revert failed (%s)", exc)
+            r.note = ("That change could not be put back just now. Your "
+                      "document is unchanged.")
+            return r
+
+    def history(self, session_id: str) -> list[dict]:
+        """The session's message history, each entry carrying `turn_index`
+        and `checkpoint_id` (PRD §8). Free. Never raises -- an unreadable
+        history comes back empty rather than failing its caller."""
+        body = self._history_body(session_id)
+        if body is None:
             return []
+        entries = body.get("messages")
+        if entries is None:
+            entries = body.get("history") or []
+        return list(entries)
+
+    def _durable_document_id(self, session_id: str) -> str | None:
+        """Resolve the session's focused document to the permanent id
+        `structure` needs. `GET /v1/documents/{id}` 400s on the session id
+        and on the session-local slot id (e.g. `doc_primary`) alike -- it
+        wants `durable_document_id`, which only this free read
+        (`GET /v1/sessions/{id}/documents`) carries."""
+        try:
+            resp = requests.get(
+                f"{BASE}/v1/sessions/{session_id}/documents",
+                headers=self._headers(),
+                timeout=30,
+            )
+            resp.raise_for_status()
+            body = resp.json() or {}
+            docs = body.get("documents") or []
+            focused = body.get("focused_document_id")
+            for doc in docs:
+                if doc.get("document_id") == focused:
+                    return doc.get("durable_document_id")
+            if docs:
+                return docs[0].get("durable_document_id")
+            return None
+        except Exception as exc:  # noqa: BLE001
+            log.warning("SuperDocs durable document id lookup failed (%s)", exc)
+            return None
+
+    def structure(self, session_id: str) -> dict | None:
+        """The document's structure -- section_count, block_count, media --
+        documented as the free "did my edit land?" read (PRD §6). Correct
+        and kept public, but turn-level reconciliation uses the session's
+        document version instead (`_version_id`), which needs no id
+        resolution; this one does, via `_durable_document_id`, so it costs
+        an extra free round trip. `None` when either read fails, which is
+        not the same as "unchanged" and callers must not treat it as one."""
+        try:
+            durable_id = self._durable_document_id(session_id)
+            if not durable_id:
+                return None
+            resp = requests.get(
+                f"{BASE}/v1/documents/{durable_id}",
+                headers=self._headers(),
+                timeout=30,
+            )
+            resp.raise_for_status()
+            body = resp.json() or {}
+            return body.get("structure", body)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("SuperDocs structure read failed (%s)", exc)
+            return None
+
+
+def _picture_count(blob: bytes) -> int:
+    """How many readable pictures a `.docx` actually carries."""
+    import io
+    import zipfile
+
+    from . import media
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob)) as z:
+            total = 0
+            for n in z.namelist():
+                if not n.startswith(media.MEDIA_DIR):
+                    continue
+                blob = z.read(n)
+                if media.sniff_ext(blob) and media.is_complete(blob):
+                    total += 1
+            return total
+    except Exception:  # noqa: BLE001 -- an unreadable answer is not a count
+        return 0
+
+
+def _words(text: str) -> list[str]:
+    """Text reduced to what a reader would call the words, so that a formatting
+    pass -- which may re-wrap, re-space or re-escape -- reads as no change."""
+    import html as _html
+    import re
+
+    plain = _html.unescape(re.sub(r"<[^>]+>", " ", text))
+    return re.findall(r"[a-z0-9]+", plain.lower())
+
+
+def docx_text(blob: bytes) -> str:
+    """The text of a `.docx`, run by run. Deliberately not a full parse: this is
+    asked only "what does it say"."""
+    import io
+    import re
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob)) as z:
+            body = z.read("word/document.xml").decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return ""
+    return " ".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", body))
+
+
+def content_drift(sent: bytes, got: bytes) -> tuple[int, int]:
+    """(words added, words removed) between what we sent and what came back.
+
+    A multiset rather than a sequence: reordering a table's cells is not this
+    guard's business, and inventing a paragraph is.
+    """
+    from collections import Counter
+
+    before = Counter(_words(docx_text(sent)))
+    after = Counter(_words(docx_text(got)))
+    return sum((after - before).values()), sum((before - after).values())
+
+
+def _why_not_acceptable(sent: bytes, got: bytes) -> str:
+    """Empty when the styled file may be handed over, else the reason it may not.
+
+    Two checks, both on the same principle: a formatting pass has no business
+    changing what the document *is*.
+
+    * **Pictures.** The styling path used to send HTML with the images stripped
+      out of it, so every styled file came back with no pictures at all and
+      nothing noticed. It now sends the rebuilt file, whose pictures travel with
+      it -- and counts them on the way back, because "the docs say images are
+      preserved" is a reason to expect it, not a reason to skip checking.
+    * **Words.** A document-editing model handed a sparse recovered file will
+      fill it out -- observed live on 2026-08-20, where a four-line report came
+      back with invented paragraphs, a subtotal row, a disclaimer and a
+      signature block. Handing that to somebody who came here to get their own
+      words back is the worst output this product could produce: it opens
+      cleanly, it looks better than the plain rebuild, and it is partly fiction.
+    """
+    before, after = _picture_count(sent), _picture_count(got)
+    if after < before:
+        return f"with {before - after} fewer pictures than it was sent"
+
+    added, removed = content_drift(sent, got)
+    if added + removed:
+        return f"with the wording changed ({added} added, {removed} removed)"
+    return ""

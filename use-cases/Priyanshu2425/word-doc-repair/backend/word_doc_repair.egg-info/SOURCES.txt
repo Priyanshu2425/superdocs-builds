@@ -8,6 +8,8 @@ backend/docrepair/engine.py
 backend/docrepair/measure.py
 backend/docrepair/media.py
 backend/docrepair/salvage.py
+backend/docrepair/screenshots.py
+backend/docrepair/style_extractor.py
 backend/docrepair/styled_export.py
 backend/docrepair/superdocs_client.py
 backend/docrepair/web.py

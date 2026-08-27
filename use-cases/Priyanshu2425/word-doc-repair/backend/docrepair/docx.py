@@ -57,9 +57,16 @@ IMAGE_REL = ("http://schemas.openxmlformats.org/officeDocument/2006/"
 
 
 def doc_rels(images: list[tuple[str, str]] | None = None) -> str:
-    """`rId1` is always the stylesheet; images take rId2 upwards."""
+    """`rId1` is always the stylesheet; images take rId2 upwards.
+
+    Targets are escaped: they derive from member names read out of the damaged
+    original, and one quote in one of them used to produce a rebuild whose
+    relationship part was malformed — a file that does not open, handed to
+    somebody whose complaint was that their file does not open.
+    """
     extra = "".join(
-        f'<Relationship Id="{rid}" Type="{IMAGE_REL}" Target="{target}"/>'
+        f'<Relationship Id="{rid}" Type="{IMAGE_REL}" '
+        f'Target="{media.esc_attr(target)}"/>'
         for rid, target in (images or [])
     )
     return (
@@ -106,6 +113,10 @@ class Block:
     level: int = 1
     rows: list[list[str]] | None = None
     image: Image | None = None
+    #: Set when the picture was found inside a table cell and so is written
+    #: after the table rather than in it. The report says so; a reader who sees
+    #: a photograph move out of a cell should be told why.
+    from_table: bool = False
 
 
 def read_blocks(document_xml: bytes, targets: dict[str, str] | None = None,
@@ -125,12 +136,34 @@ def read_blocks(document_xml: bytes, targets: dict[str, str] | None = None,
         return []
 
     blocks: list[Block] = []
-    for el in body:
-        if el.tag == f"{W}p":
-            for rid in media.embedded_ids(el):
-                img = images.get(targets.get(rid, ""))
-                if img is not None:
-                    blocks.append(Block("image", text=img.name, image=img))
+    _walk(body, targets, images, blocks)
+    return blocks
+
+
+def _walk(container: ET.Element, targets: dict[str, str],
+          images: dict[str, Image], blocks: list[Block]) -> None:
+    """Collect blocks from a body-like container, following the wrappers.
+
+    Iterating the direct children of `<w:body>` and stopping there misses two
+    things that are ordinary rather than exotic:
+
+    * `<w:sdt>` — a content control. Google Docs and every Word template built
+      on one of these wrap whole paragraphs and tables in them, and a walker
+      that does not step inside sees an empty document where a person sees
+      their text.
+    * a picture inside a table cell. The cell reader takes text and nothing
+      else, so the image was never counted as placed and fell through to the
+      end of the document — if it survived at all.
+    """
+    for el in container:
+        if el.tag == f"{W}sdt":
+            # The control is a wrapper; its content is the document's content.
+            content = el.find(f"{W}sdtContent")
+            if content is not None:
+                _walk(content, targets, images, blocks)
+        elif el.tag == f"{W}p":
+            for img in _images_in(el, targets, images):
+                blocks.append(Block("image", text=img.name, image=img))
             text = _para_text(el)
             if not text.strip():
                 continue
@@ -140,11 +173,29 @@ def read_blocks(document_xml: bytes, targets: dict[str, str] | None = None,
             )
         elif el.tag == f"{W}tbl":
             rows = []
-            for tr in el.findall(f"{W}tr"):
+            for tr in el.iter(f"{W}tr"):
                 rows.append([_cell_text(tc) for tc in tr.findall(f"{W}tc")])
             if rows:
                 blocks.append(Block("table", rows=rows))
-    return blocks
+            # A cell's pictures follow the table rather than being written back
+            # into it. `_table` writes text-only cells, and inventing drawing
+            # markup inside one to hold an image would be this module guessing
+            # at a layout it did not read. The rule the package already states
+            # applies here too: obviously placed beats silently placed wrong.
+            for img in _images_in(el, targets, images):
+                blocks.append(Block("image", text=img.name, image=img,
+                                    from_table=True))
+
+
+def _images_in(el: ET.Element, targets: dict[str, str],
+               images: dict[str, Image]) -> list[Image]:
+    """The pictures this element references, in the order it references them."""
+    out: list[Image] = []
+    for rid in media.embedded_ids(el):
+        img = images.get(targets.get(rid, ""))
+        if img is not None:
+            out.append(img)
+    return out
 
 
 def _para_text(p: ET.Element) -> str:
@@ -207,25 +258,97 @@ def image_blocks(blocks: list[Block]) -> list[Block]:
     return [b for b in blocks if b.kind == "image" and b.image is not None]
 
 
-def _rel_ids(blocks: list[Block]) -> dict[str, str]:
-    """One relationship id per distinct image, starting after the stylesheet.
+@dataclass(frozen=True)
+class Carried:
+    """One picture as it will appear in the rebuilt package."""
 
-    Keyed by member name rather than by position, so the same picture used twice
-    is carried once and referenced twice — which is how the original stored it.
+    rel_id: str        # rId2 upwards; rId1 is always the stylesheet
+    part_name: str     # where it is written, e.g. word/media/image1.png
+    image: Image
+
+    @property
+    def target(self) -> str:
+        """The relationship target, which is relative to `word/`."""
+        return self.part_name.split("word/", 1)[-1]
+
+
+@dataclass(frozen=True)
+class Dropped:
+    """One picture that could not be written, and the reason a reader gets."""
+
+    image: Image
+    reason: str
+
+
+@dataclass(frozen=True)
+class MediaPlan:
+    carried: dict[str, Carried]        # keyed by the ORIGINAL member name
+    dropped: list[Dropped]
+
+
+def plan_media(blocks: list[Block]) -> MediaPlan:
+    """Decide what each recovered picture is called in the rebuild, and whether
+    it can be written at all.
+
+    Two things are settled here, together, because they are the same decision:
+
+    * **The name is reissued, not carried over.** The original member name comes
+      out of a damaged archive under somebody else's control. It has been seen
+      to contain a quote (which breaks the relationship XML), a `..` segment
+      (which walks out of `word/media/` when anything extracts the result), and
+      an extension that disagrees with the bytes. None of that is content — the
+      name of a picture part is plumbing nobody reads — so it is replaced with a
+      plain `word/media/imageN.<ext>` and the bytes are kept exactly.
+    * **The extension comes from the bytes.** `[Content_Types].xml` must declare
+      a type for every extension in the package. It used to declare only the
+      ones it recognised while the writer wrote the part regardless, so a
+      picture Word stores as `.wdp` produced a rebuild Word itself calls
+      corrupt. A format we cannot name is now refused and reported, because
+      handing somebody a second unopenable file is worse than handing them a
+      file with one picture missing and a line saying so.
+
+    Keyed by original member name, so one picture used twice is carried once and
+    referenced twice — which is how the original stored it.
     """
-    ids: dict[str, str] = {}
+    carried: dict[str, Carried] = {}
+    dropped: list[Dropped] = []
+    seen: set[str] = set()
     for b in image_blocks(blocks):
-        ids.setdefault(b.image.name, f"rId{len(ids) + 2}")
-    return ids
+        img = b.image
+        if img.name in carried or img.name in seen:
+            continue
+        if not img.complete:
+            seen.add(img.name)
+            dropped.append(Dropped(img, "it was cut short by the damage and only "
+                                        "part of it could be read"))
+            continue
+        if not img.ext:
+            seen.add(img.name)
+            dropped.append(Dropped(img, "it is in a picture format this rebuild "
+                                        "cannot declare, so including it would "
+                                        "have produced a file Word refuses to open"))
+            continue
+        n = len(carried) + 1
+        carried[img.name] = Carried(
+            rel_id=f"rId{n + 1}",
+            part_name=f"{media.MEDIA_DIR}image{n}.{img.ext}",
+            image=img,
+        )
+    return MediaPlan(carried=carried, dropped=dropped)
 
 
-def build_document_xml(blocks: list[Block]) -> str:
-    rel_ids = _rel_ids(blocks)
+def build_document_xml(blocks: list[Block], plan: MediaPlan | None = None) -> str:
+    plan = plan if plan is not None else plan_media(blocks)
     body = []
     for n, b in enumerate(blocks, 1):
         if b.kind == "image" and b.image is not None:
-            body.append(media.drawing_xml(rel_ids[b.image.name], b.image, n,
-                                          b.image.name.rsplit("/", 1)[-1]))
+            got = plan.carried.get(b.image.name)
+            # A picture the plan refused is not referenced either. A drawing
+            # pointing at a part that was not written is a broken file.
+            if got is None:
+                continue
+            body.append(media.drawing_xml(got.rel_id, b.image, n,
+                                          got.part_name.rsplit("/", 1)[-1]))
         elif b.kind == "heading":
             body.append(_p(b.text, f"Heading{min(max(b.level, 1), 3)}"))
         elif b.kind == "table" and b.rows:
@@ -247,31 +370,32 @@ def build_document_xml(blocks: list[Block]) -> str:
     )
 
 
-def write_docx(blocks: list[Block]) -> bytes:
+def write_docx(blocks: list[Block], plan: MediaPlan | None = None) -> bytes:
     import io
 
-    rel_ids = _rel_ids(blocks)
-    by_name = {b.image.name: b.image for b in image_blocks(blocks)}
-    extensions = [img.ext for img in by_name.values()]
+    plan = plan if plan is not None else plan_media(blocks)
+    carried = list(plan.carried.values())
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         # mimetype-equivalent ordering is not required for OOXML, but the
-        # content types part must be present and first is conventional.
-        z.writestr("[Content_Types].xml", content_types(extensions))
+        # content types part must be present and first is conventional. Every
+        # extension written below is declared here -- the two lists are built
+        # from the same plan precisely so they cannot drift apart again.
+        z.writestr("[Content_Types].xml",
+                   content_types([c.image.ext for c in carried]))
         z.writestr("_rels/.rels", ROOT_RELS)
         # document.xml goes early, as Word writes it. The order is not
         # cosmetic: a truncated download loses the END of the file, so the part
         # carrying the content is the one you want furthest from the cut.
-        z.writestr("word/document.xml", build_document_xml(blocks))
+        z.writestr("word/document.xml", build_document_xml(blocks, plan))
         z.writestr("word/_rels/document.xml.rels",
-                   doc_rels([(rel_ids[n], n.split("word/", 1)[-1])
-                             for n in by_name]))
+                   doc_rels([(c.rel_id, c.target) for c in carried]))
         z.writestr("word/styles.xml", STYLES)
-        for name, img in by_name.items():
+        for c in carried:
             # Already compressed. Deflating a PNG again costs time and saves
             # nothing, and this runs while somebody is watching a progress bar.
-            z.writestr(name, img.data, zipfile.ZIP_STORED)
+            z.writestr(c.part_name, c.image.data, zipfile.ZIP_STORED)
     return buf.getvalue()
 
 
@@ -290,6 +414,12 @@ def blocks_to_html(blocks: list[Block], inline_images: bool = False,
     spent = 0
     for b in blocks:
         if b.kind == "image" and b.image is not None:
+            # The same refusal the writer makes, for the same reason: a picture
+            # that is half-read or in a format we cannot name renders as a
+            # broken image, and a broken image in the preview reads as a picture
+            # that was not recovered rather than one that could not be shown.
+            if not b.image.writable:
+                continue
             if not inline_images:
                 continue
             if spent + len(b.image.data) > image_budget:

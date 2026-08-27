@@ -23,7 +23,7 @@
    ========================================================================== */
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  capabilities,
+  capabilities as fetchCapabilities,
   checkFile,
   repairFile,
   RepairError,
@@ -32,8 +32,10 @@ import {
   type Stage,
 } from "./lib/repair";
 import { Report } from "./components/Report";
+import { Preview } from "./components/Preview";
+import { Counter } from "./components/Counter";
 
-type Phase = "idle" | "working" | "done";
+type Phase = "idle" | "working" | "done" | "counter";
 
 function docket(name: string): string {
   // A docket number is a receipt, not an identifier the server knows about.
@@ -55,18 +57,19 @@ export default function App() {
   const [problem, setProblem] = useState<string | null>(null);
   const [handed, setHanded] = useState<{ name: string; size: number } | null>(null);
   const [over, setOver] = useState(false);
-  // Asked once, before anything is offered. A page that advertises a step it
-  // cannot take is the button that fails when somebody presses it.
-  const [can, setCan] = useState<Capabilities>({ styling: false, note: "" });
   const input = useRef<HTMLInputElement>(null);
 
+  // Asked once, before anything is offered (lib/repair.ts docstring) -- the
+  // door either genuinely opens or is not drawn, never a button that fails
+  // when pressed.
+  const [capabilities, setCapabilities] = useState<Capabilities>({ styling: false, note: "" });
   useEffect(() => {
-    let live = true;
-    void capabilities().then((c) => {
-      if (live) setCan(c);
+    let cancelled = false;
+    void fetchCapabilities().then((c) => {
+      if (!cancelled) setCapabilities(c);
     });
     return () => {
-      live = false;
+      cancelled = true;
     };
   }, []);
 
@@ -101,6 +104,16 @@ export default function App() {
     setHanded(null);
     if (input.current) input.current.value = "";
   }, []);
+
+  // The door: entered from the handover panel, left by "back to the report".
+  // The report and the handed-over file it describes stay in state across the
+  // round trip -- going back finds the same verdict, not a fresh upload.
+  const openCounter = useCallback(() => setPhase("counter"), []);
+  const backToReport = useCallback(() => setPhase("done"), []);
+
+  if (phase === "counter" && report && handed) {
+    return <Counter report={report} handed={handed} onBack={backToReport} />;
+  }
 
   return (
     <>
@@ -195,7 +208,7 @@ export default function App() {
                 <h1 style={{ fontSize: "var(--t6)" }}>
                   {phase === "working"
                     ? "Reading your document"
-                    : report?.ok
+                    : report?.verdict !== "refused"
                       ? "Your document, as far as it could be read"
                       : "This file could not be repaired"}
                 </h1>
@@ -225,10 +238,22 @@ export default function App() {
                   </ul>
                 ) : null}
 
+                {/* The verdict, and — when the styling pass degraded — the
+                    sentence saying so. DESIGN.md: "A degraded styling pass is
+                    stated, never silent." It was stated on screen and nowhere
+                    else, so by ear it was silent: this region announced the
+                    verdict token alone, and somebody listening would not learn
+                    that a styled copy had been thrown away or that nothing
+                    could be sent this month. On success there is nothing to
+                    add — the file simply arrived as promised. */}
                 <p aria-live="polite" className="sr-only">
-                  {phase === "working"
+                   {phase === "working"
                     ? stages[stages.length - 1]?.message ?? "Working."
-                    : report?.summary ?? ""}
+                    : report
+                      ? [report.verdict, report.styled ? "" : report.styling_note]
+                          .filter(Boolean)
+                          .join(". ")
+                      : ""}
                 </p>
 
                 {phase === "working" ? (
@@ -240,10 +265,16 @@ export default function App() {
 
                 {phase === "done" && report ? (
                   <>
+                    {/* The document before the verdict about it. Someone
+                        deciding whether this was worth anything is answering a
+                        question only the thing itself can answer — and the
+                        pictures are the part they are checking for. */}
+                    <Preview html={report.preview_html ?? ""} />
                     <Report
                       report={report}
+                      capabilities={capabilities}
                       onAnother={another}
-                      styling={{ available: can.styling, note: can.note }}
+                      onOpenCounter={openCounter}
                     />
                     {/* The verdict is what someone came for; the steps are what
                         they read only if they want to check the working. */}

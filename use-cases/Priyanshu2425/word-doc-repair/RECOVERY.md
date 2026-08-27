@@ -1,6 +1,6 @@
 # The recovery rate — method first, then the number
 
-**Measured 2026-08-20.** Raw data: [`corpus/measurements.json`](corpus/measurements.json),
+**Measured 2026-08-26.** Raw data: [`corpus/measurements.json`](corpus/measurements.json),
 written by `python3 -m docrepair.measure --write` and never by hand.
 `tests/test_corpus.py` fails if that file and the code disagree.
 
@@ -82,8 +82,15 @@ measured the same way and neither side is measured by the thing under test.
 
 ### What is not measured
 
-- **Formatting fidelity.** The rebuild is deliberately plain — theme, fonts and
-  spacing are not carried — so no figure here is about how the document looks.
+- **Formatting fidelity.** Every figure here is measured on the **local
+  rebuild**, which is deliberately plain: theme, fonts and spacing are not
+  recovered from a damaged file and are not guessed at. The file a person is
+  actually handed has since been through the SuperDocs styling pass, which is
+  where the formatting comes from. Nothing in this document measures that pass —
+  it is a network call to a service whose output is not deterministic, so it is
+  guarded (a styled file returning with fewer pictures or different words is
+  refused) rather than scored. The local rebuild is what these numbers are
+  about, and it is also the file a person gets when the pass cannot run.
 - **Real-world damage.** Every fixture was damaged by `corpus.py` in a named way.
   See *What was looked for and not found* below.
 - **Word's own verdict.** Outputs are reopened and reread by Python, not by
@@ -100,7 +107,7 @@ measured the same way and neither side is measured by the thing under test.
 ```
 kind         n   mean recall     min   verdicts
 lossless    40         1.000   1.000   full=40
-lossy       27         0.644   0.000   full=14 partial=6 refused=7
+lossy       27         0.644   0.000   full=8 partial=12 refused=7
 fatal       20         0.003   0.000   partial=4 refused=16
 
   damage that destroyed nothing, fully recovered   40/40
@@ -108,6 +115,15 @@ fatal       20         0.003   0.000   partial=4 refused=16
   empty successes                                      0
   crashes                                              0
 ```
+
+> **The lossy verdicts moved on 2026-08-26, and the tool did not get worse.**
+> `full=14 partial=6` became `full=8 partial=12` because the harness learned to
+> see picture and table loss. `_verdict` used to return *full* on any fixture
+> with complete word recall, consulting pictures only to tell an empty success
+> apart and never consulting tables at all — so a rebuild that dropped every
+> photograph in the document still scored full marks. Six fixtures that were
+> being called full were losing structure. They are the same six files; only the
+> honesty of the label changed. BUG-093.
 
 **On damage that destroys no content, every word came back: 40 out of 40, word
 recall 1.000, minimum 1.000.** That is the number worth quoting, because it is
@@ -130,16 +146,26 @@ tells its owner nothing at all.
 | lossless | zeroed-eocd | 5 | 1.000 | full 5 |
 | lossless | duplicate-entry | 5 | 1.000 | full 5 |
 | lossless | bad-crc | 5 | 1.000 | full 5 |
-| lossy | truncated-90 | 5 | 1.000 | full 5 |
-| lossy | truncated-60 | 5 | 1.000 | full 5 |
-| lossy | truncated-30 | 5 | 0.400 | full 2, refused 3 |
-| lossy | unclosed-tags | 5 | 0.652 | partial 5 |
+| lossy | truncated-90 | 5 | 1.000 | full 4, partial 1 |
+| lossy | truncated-60 | 5 | 1.000 | full 3, partial 2 |
+| lossy | truncated-30 | 5 | 0.400 | full 1, partial 1, refused 3 |
+| lossy | unclosed-tags | 5 | 0.651 | partial 5 |
 | lossy | body-bitrot | 5 | 0.028 | partial 1, refused 4 |
-| lossy | media-truncated | 2 | 1.000 | full 2 |
+| lossy | media-truncated | 2 | 1.000 | partial 2 |
 | fatal | missing-document-part | 5 | 0.000 | refused 5 |
 | fatal | not-a-zip | 5 | 0.000 | refused 5 |
 | fatal | zero-length-body | 5 | 0.007 | partial 2, refused 3 |
 | fatal | empty-body | 5 | 0.007 | partial 2, refused 3 |
+
+### `media-truncated`: full recall, and still not a full recovery
+
+Every word comes back — the damage is to a picture, not to the body — and the
+mode scored **full** until 2026-08-26. It was wrong twice over. The half-read
+picture was written into the rebuild, where Word draws a grey placeholder, and
+`counts_of` counted it as recovered because a member with that name existed in
+the archive. A picture is now counted only if its bytes decode and run to the
+format's own end marker, and one that does not is refused and reported rather
+than embedded. The mode scores **partial**, which is what it always was.
 
 ### The four fatal fixtures that were not refused
 
@@ -174,7 +200,7 @@ wrong number.
 
 ## Four defects the corpus found, all fixed
 
-None of these were visible to the 63 tests that existed before it. Each is in
+None of these were visible to the 63 tests that existed at the time. Each is in
 `BUGS.md` with its repro.
 
 - **BUG-065 — a bit-rotted file crashed the repair.** `zipfile.testzip()` raises
