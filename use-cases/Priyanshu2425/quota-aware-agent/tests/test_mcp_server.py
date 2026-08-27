@@ -146,7 +146,15 @@ def test_the_server_starts_and_advertises_its_tools():
         params = StdioServerParameters(
             command=sys.executable,
             args=["-m", "quota_aware_agent.mcp_server"],
-            env={**os.environ, "PYTHONPATH": root, "SUPERDOCS_API_KEY": ""},
+            # Every credential emptied, not just the key. There are two routes
+            # to SuperDocs now — your own key, or the relay — and a developer
+            # who has run `cp .env.example .env` would otherwise hand this
+            # subprocess working relay credentials, at which point the test
+            # would make a real network call and stop proving what it says it
+            # proves. Emptied rather than deleted: the dotenv loader only fills
+            # names that are absent, so an empty value is what pins them.
+            env={**os.environ, "PYTHONPATH": root, "SUPERDOCS_API_KEY": "",
+                 "RELAY_URL": "", "RELAY_KEY": ""},
         )
         async with stdio_client(params) as (r, w):
             async with ClientSession(r, w) as s:

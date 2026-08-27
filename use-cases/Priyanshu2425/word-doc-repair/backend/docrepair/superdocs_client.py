@@ -27,33 +27,18 @@ The call sequence, against the documented endpoints:
 
 On the approval step
 --------------------
-The brief names a four-call minimum contract: upload, chat, approve, export.
-All four are made -- but on the road where a person is actually deciding.
-
-There are two roads through this module and they are not the same shape:
-
-  * `style()`, the automatic pass inside `/api/recover`. A machine-authored,
-    formatting-only instruction on a document the person dropped a moment ago.
-    They have no basis on which to judge it, and the docs' own recommendation
-    is to default to auto-apply and make review the opt-in
-    (guides/human-in-the-loop, "Recommended UX pattern"). This road stays
-    synchronous and keeps `_why_not_acceptable` -- a styled file that comes
-    back with fewer pictures or different words is refused and the plain
-    rebuild ships with the reason said out loud.
-
-  * `turn()` / `decide()`, the counter. The person wrote the instruction, so
-    they are the only one who can say whether the result is what they meant.
-    `approval_mode='ask_every_time'` on `/v1/chat/async` makes the job pause at
-    `awaiting_approval` carrying its proposed changes; `decide()` answers with
-    `POST /v1/chat/{session_id}/approve`. Nothing is applied until they say so,
-    and denying costs nothing -- the platform does not bill a denied
-    review-mode change.
-
-This reverses the decision recorded here until 2026-08-27, which was that
-adding approve "would mean moving to the async flow purely to have something to
-approve". The counter was already on `/v1/chat/async`; it simply sent no
-`approval_mode` and cancelled the job if the pause ever appeared. The cost that
-argument treated as prohibitive had already been paid. See BUG-097.
+The task brief names a four-call minimum contract: upload, chat, approve,
+export. This build makes three of them, deliberately and on the product owner's
+instruction: the synchronous `/v1/chat` endpoint applies its change inline, and
+the documented approval endpoint (`POST /v1/chat/{session_id}/approve`) exists
+only on the asynchronous `chat_async` path, reached by setting
+`approval_mode='ask_every_time'` and polling to `awaiting_approval`. Adding it
+would mean moving to the async flow purely to have something to approve. The
+decision recorded for this build is to trust the model on a formatting-only
+instruction and to verify the *result* instead — see `_why_not_acceptable`,
+which refuses a styled file that came back with fewer pictures or different
+words than the one that was sent. Verification after the fact is doing the work
+approval-before-the-fact would have done, on the thing that actually ships.
 
 Prompting for styling
 ---------------------
@@ -71,9 +56,298 @@ from pathlib import Path
 
 import requests
 
-BASE = "https://api.superdocs.app"
+# -- where a request goes, and who it goes as ---------------------------------
+#
+# There are two ways to reach SuperDocs, and choosing between them is a
+# security position rather than a convenience. Somebody who has their own key
+# sends it to SuperDocs' own origin, where it never touches infrastructure a
+# third party operates and logs. Somebody who has no key at all still gets a
+# styling pass, because relay -- a small deployed worker that holds a key and
+# lends it out under a daily ration -- stands in for one. What that costs is
+# the ration and somebody else's logs, which is a fair price for not having to
+# sign up before finding out whether this thing salvages your document.
+#
+# Relay's SuperDocs base is a drop-in replacement: every path below is
+# unchanged, so this is a base-and-key swap and nothing more.
+
+#: SuperDocs' own origin -- where a request goes the moment a key exists to
+#: send it with.
+SUPERDOCS_ORIGIN = "https://api.superdocs.app"
+
+#: This module's older published name for the origin, from when there was
+#: nowhere else a request could go. Nothing on the request path reads it any
+#: more -- every call is built on `self.base` -- and it is kept only so an
+#: importer that reached for it still finds the origin.
+BASE = SUPERDOCS_ORIGIN
+
+#: Relay's defaults, committed on purpose. `RELAY_KEY` is not a secret: it is
+#: the thing that makes `cp .env.example .env` enough to run this build.
+RELAY_URL = "https://relay.pxyz943.workers.dev"
+RELAY_KEY = "pk_f2a01b7f189f0d1ea6c57a04cb83c14e"
+#: Relay's SuperDocs mount. `/v1/...` continues underneath it unchanged.
+RELAY_SUPERDOCS_PATH = "/v1/superdocs"
+
+#: What relay lends out, per key per day. It charges for `/v1/chat`,
+#: `/v1/chat/async` and re-edits only; uploads, exports, job polls, session
+#: reads and `whoami` are free -- the same shape as SuperDocs' own metering,
+#: which is why the ration below fits inside `Allowance` rather than sitting
+#: beside it as a second, parallel notion of "no more".
+RELAY_DAILY_OPERATIONS = 460
+#: Relay refuses a request body larger than this. Named in the message rather
+#: than guessed at: somebody whose 12 MB document was turned away needs to
+#: know it was the size, and that their own key carries no such ceiling.
+RELAY_MAX_REQUEST_BYTES = 8 * 1024 * 1024
 
 log = logging.getLogger("superdocs")
+
+
+class NotConfigured(RuntimeError):
+    """No way to reach SuperDocs at all: no key of one's own, and no relay."""
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """Where requests go, what they go as, and whether that is relay.
+
+    `available` is false only when nothing whatsoever is configured -- the one
+    case this build has always degraded to the plain rebuild for.
+    """
+
+    base_url: str = SUPERDOCS_ORIGIN
+    api_key: str = ""
+    using_relay: bool = False
+
+    @property
+    def available(self) -> bool:
+        return bool(self.api_key)
+
+
+def resolve_superdocs(env=None, *, strict: bool = False) -> Endpoint:
+    """The precedence rule, in the one place everything reads it from.
+
+    1. `SUPERDOCS_API_KEY` set and non-empty -> that key, at
+       `SUPERDOCS_BASE_URL` if given and the origin otherwise. A key its owner
+       brought goes to the origin and nowhere else: handing it to relay would
+       put somebody's own credential through infrastructure they did not
+       choose, and relay refuses upstream-shaped keys anyway.
+    2. else `RELAY_URL` and `RELAY_KEY` -> relay's SuperDocs mount. Both carry
+       working defaults, which is what "it runs with no keys" actually means;
+       setting either to empty is how a deployment opts out of relay entirely.
+    3. else nothing is configured. `strict=True` raises naming both ways out.
+       Otherwise an empty `Endpoint` comes back, because the styling pass has
+       always been the optional half of this build: a missing key is a
+       sentence somebody reads, not a crash.
+    """
+    env = os.environ if env is None else env
+
+    own = (env.get("SUPERDOCS_API_KEY") or "").strip()
+    if own:
+        base = (env.get("SUPERDOCS_BASE_URL") or "").strip() or SUPERDOCS_ORIGIN
+        return Endpoint(base.rstrip("/"), own, False)
+
+    relay_url = (env.get("RELAY_URL", RELAY_URL) or "").strip()
+    relay_key = (env.get("RELAY_KEY", RELAY_KEY) or "").strip()
+    if relay_url and relay_key:
+        return Endpoint(relay_url.rstrip("/") + RELAY_SUPERDOCS_PATH,
+                        relay_key, True)
+
+    if strict:
+        raise NotConfigured(
+            "Nothing to reach SuperDocs with. Set SUPERDOCS_API_KEY to your "
+            "own key, or set RELAY_URL and RELAY_KEY to borrow one — "
+            f"RELAY_URL={RELAY_URL} and RELAY_KEY={RELAY_KEY} work as they "
+            "stand. See .env.example.")
+    return Endpoint()
+
+
+# -- retrying, and the four kinds of "too many" -------------------------------
+#
+# Retry the statuses that mean "later" and never the ones that mean "no": a
+# 401 tried five times is five identical refusals and a slower answer to a
+# question already settled.
+
+RETRY_STATUSES = frozenset({429, 502, 503, 504})
+NEVER_RETRY_STATUSES = frozenset({400, 401, 403, 404, 413, 422})
+MAX_ATTEMPTS = 5
+#: No single attempt ever sleeps longer than this, whatever `Retry-After`
+#: asks for. The one `Retry-After` that would exceed it -- relay's, counting
+#: to 00:00 UTC -- is not a wait at all but a stop, and never reaches a sleep.
+RETRY_SLEEP_CAP = 60.0
+BACKOFF_BASE = 1.0
+
+
+class SuperDocsRefusal(RuntimeError):
+    """A refusal specific enough to be worth telling somebody about, rather
+    than a transport failure that only ever produces "it did not work"."""
+
+
+class RationExhausted(SuperDocsRefusal):
+    """Relay's daily ration is spent. Emphatically not a rate limit: its
+    `Retry-After` counts to 00:00 UTC, so retrying is waiting out the day."""
+
+
+class QuotaExhausted(SuperDocsRefusal):
+    """SuperDocs' own monthly quota, arriving as an application 429 -- a JSON
+    `detail` with a `Retry-After`. Surfaced, never spun on."""
+
+
+class RequestTooLarge(SuperDocsRefusal):
+    """Relay's request-body ceiling. Their own key has none."""
+
+
+class ModelNotAllowed(SuperDocsRefusal):
+    """Relay's model allowlist. Unreachable from this build, which names no
+    model of its own -- kept so that if it ever does, the refusal says which
+    models are allowed instead of arriving as "it did not work"."""
+
+
+#: What a person reads when the shared ration is gone. One string, reused
+#: everywhere it can happen, so the two paths that can hit it never drift into
+#: telling somebody two different things. It names both ways out, because "try
+#: again later" is the one piece of advice that does not work here: the ration
+#: returns at midnight UTC and not before.
+_RATION_NOTE = (
+    "The shared styling allowance this copy of the page runs on is used up "
+    "for today, so the file below is the plain rebuild — complete, and yours. "
+    "It styles again tomorrow, or straight away if you put your own "
+    "SUPERDOCS_API_KEY in .env."
+)
+
+#: When relay last said the daily ration was spent, and when it comes back.
+#: Module-level because `web.py` builds a client per request, so anything
+#: remembered on an instance is forgotten before it can be used. This is what
+#: turns the ration into a *pre-flight* ceiling, read by `allowance()` in the
+#: same breath as the monthly one, instead of something rediscovered by
+#: spending a round trip on every attempt.
+_RATION_SPENT_UNTIL = 0.0
+
+
+def _note_ration_spent(retry_after: float | None) -> None:
+    global _RATION_SPENT_UNTIL
+    import time
+
+    # Relay's own `Retry-After` counts to midnight UTC. Bounded at a day in
+    # case it is missing or absurd: a ceiling that expires too early costs one
+    # wasted request, one that never expires costs every request until the
+    # process restarts.
+    seconds = retry_after if retry_after and retry_after > 0 else 3600.0
+    _RATION_SPENT_UNTIL = time.time() + min(seconds, 24 * 3600)
+
+
+def _ration_is_spent() -> bool:
+    import time
+
+    return time.time() < _RATION_SPENT_UNTIL
+
+
+def _header(resp, name: str):
+    headers = getattr(resp, "headers", None) or {}
+    try:
+        return headers.get(name)
+    except Exception:  # noqa: BLE001 -- a header map that will not be read
+        return None
+
+
+def _retry_after(resp) -> float | None:
+    """`Retry-After` in seconds, uncapped. Uncapped on purpose: the sleep site
+    caps it, and the ration needs the real number to know when the day ends."""
+    raw = _header(resp, "Retry-After")
+    if raw is None:
+        return None
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        # The HTTP-date form. Nothing observed on this path emits it, and
+        # guessing a date badly is worse than falling back to plain backoff.
+        return None
+
+
+def _body_of(resp):
+    try:
+        return resp.json()
+    except Exception:  # noqa: BLE001 -- a plain-text body is a real answer
+        return None
+
+
+def _relay_code(body) -> str:
+    """Relay's own refusals carry an `error` object; SuperDocs uses `detail`,
+    so the presence of this is what tells the two apart. Branching on the code
+    and never on the prose -- prose is somebody else's to reword."""
+    if not isinstance(body, dict):
+        return ""
+    err = body.get("error")
+    if not isinstance(err, dict):
+        return ""
+    return str(err.get("code") or "")
+
+
+def _relay_message(body) -> str:
+    if not isinstance(body, dict):
+        return ""
+    err = body.get("error")
+    return str(err.get("message") or "") if isinstance(err, dict) else ""
+
+
+def _backoff(attempt: int) -> float:
+    """~1s, 2s, 4s, 8s, 16s with jitter. Jittered because every tab that hit
+    the same limit in the same second would otherwise come back in the same
+    second."""
+    import random
+
+    return BACKOFF_BASE * (2 ** (attempt - 1)) * (0.5 + random.random())
+
+
+def _named_refusal(resp) -> None:
+    """Raise when a non-retryable status is one relay explained, so the person
+    gets the fix rather than "it did not work". Anything else returns quietly:
+    every caller that reads a status itself -- `revert` reads 409 and 422 --
+    must keep behaving exactly as it did."""
+    body = _body_of(resp)
+    code = _relay_code(body)
+    if code in ("payload_too_large", "input_too_long"):
+        mb = RELAY_MAX_REQUEST_BYTES // (1024 * 1024)
+        raise RequestTooLarge(
+            f"the shared allowance this page runs on caps a request at {mb} MB "
+            "and this document is over it; a SUPERDOCS_API_KEY of your own has "
+            "no such ceiling")
+    if code == "forbidden_model":
+        raise ModelNotAllowed(
+            "the shared allowance this page runs on permits only "
+            "deepseek/deepseek-v4-flash and "
+            "google/gemini-embedding-2-preview@768")
+    if code == "budget_exhausted":
+        # Sent as a 429 in practice; carried on any other status it would mean
+        # exactly the same thing, and spending attempts on a day that is
+        # already over is the one thing this must not do.
+        _note_ration_spent(_retry_after(resp))
+        raise RationExhausted(_relay_message(body) or "the daily ration is spent")
+
+
+def _wait_for_429(resp) -> float | None:
+    """Seconds to wait before retrying a 429 -- or a raise, when the 429 means
+    stop. Four kinds arrive on this path and only two are worth another
+    attempt, so this branches on the body and never on the prose:
+
+      * relay `budget_exhausted` -- the day's ration is gone. Stop. Its
+        `Retry-After` counts to UTC midnight, so "retrying" would be sleeping
+        through the reset with the connection held open.
+      * relay `rate_limited`     -- relay's per-minute limiter. Retry.
+      * SuperDocs `detail` with a `Retry-After` -- the application 429, i.e.
+        the monthly quota. Surface it; spinning cannot earn quota back.
+      * a plain-text body and no `Retry-After` -- infrastructure. Retry.
+    """
+    body = _body_of(resp)
+    code = _relay_code(body)
+
+    if code == "budget_exhausted":
+        _note_ration_spent(_retry_after(resp))
+        raise RationExhausted(_relay_message(body) or "the daily ration is spent")
+    if code == "rate_limited":
+        return _retry_after(resp)
+    if (isinstance(body, dict) and body.get("detail") is not None
+            and _header(resp, "Retry-After") is not None):
+        raise QuotaExhausted(str(body.get("detail")))
+    return _retry_after(resp)
 
 #: The styling prompt, sent as `message` (the field the live SuperDocs chat
 #: endpoint accepts). Carried verbatim from the spec.
@@ -135,11 +409,19 @@ def _bounded_turn(message: str) -> str:
 
 @dataclass
 class Allowance:
-    """The operations balance, and whether anybody actually read it."""
+    """The operations balance, and whether anybody actually read it.
+
+    `period` is here because there are now two ceilings of the same kind and
+    they reset on different clocks: SuperDocs meters a month, relay rations a
+    day. It is a phrase rather than a flag so the one sentence a person reads
+    ("no more changes can be made here …") stays true without every caller
+    having to know which ceiling answered.
+    """
 
     known: bool = False
     remaining: int = 0
     tier: str = ""
+    period: str = "this month"
 
 
 @dataclass
@@ -177,69 +459,11 @@ class Turn:
     turn_index: int | None = None    # of the user message, for a later revert
     reconciled: bool = False         # True when recovered from a timeout rather than a clean reply
     stages: list = field(default_factory=list)
-    #: Set when the job paused for review instead of applying. `pending` holds
-    #: the proposed changes exactly as SuperDocs described them -- `old_html`,
-    #: `new_html` and `ai_explanation` per entry -- and `job_id` is what
-    #: `decide()` needs to answer. `ok` stays False: nothing has landed.
-    proposed: bool = False
-    pending: list = field(default_factory=list)
-    job_id: str = ""
     # No operation count and no allowance here. The counter does not report
     # what it costs us: somebody whose file broke this morning did not arrive
     # with an account, and a number describing our metering is not something
     # they can act on. The allowance is still read before anything is sent
     # (B22) -- it decides whether to send, and says nothing further.
-
-
-def pending_changes(job_body: dict) -> list[dict]:
-    """Read the proposed changes off a paused job, whatever shape they arrive in.
-
-    Two shapes exist and both are real, which is trap 1 on the brief's own
-    list:
-
-      * `GET /v1/jobs/{id}` returns `metadata.pending_changes` as a plain LIST
-        of change dicts.
-      * The same batch delivered as a `proposed_change_batch` event carries an
-        envelope whose `content` is a JSON-encoded STRING needing a second
-        parse. The docs name missing that second parse as the single most
-        common reason integrators see empty diff cards -- the fields are all
-        there and every one of them reads as undefined.
-
-    Never raises: an unreadable batch is no batch, and the caller treats that
-    the same as a job that proposed nothing.
-    """
-    meta = (job_body or {}).get("metadata") or {}
-    pending = meta.get("pending_changes")
-    if isinstance(pending, list):
-        return list(pending)
-    if pending is None:
-        for event in meta.get("intermediate_responses") or []:
-            if isinstance(event, dict) and event.get("type") == "proposed_change_batch":
-                return parse_proposed_changes(event)
-        return []
-    if isinstance(pending, str):
-        return parse_proposed_changes({"content": pending})
-    return parse_proposed_changes(pending)
-
-
-def parse_proposed_changes(envelope: dict) -> list[dict]:
-    """The second parse. A one-change turn still arrives as a one-element
-    `changes[]`, so this always returns a list and never special-cases the
-    singular form."""
-    import json as _json
-
-    content = (envelope or {}).get("content")
-    if isinstance(content, str):
-        try:
-            content = _json.loads(content)
-        except (ValueError, TypeError):
-            return []
-    if not isinstance(content, dict):
-        return []
-    changes = content.get("changes")
-    if isinstance(changes, list):
-        return [c for c in changes if isinstance(c, dict)]
-    return [content] if content.get("change_id") else []
 
 
 @dataclass
@@ -256,8 +480,23 @@ class Reverted:
 class SuperDocsClient:
     """A thin wrapper that performs upload -> instruct -> export."""
 
-    def __init__(self, api_key: str | None = None) -> None:
-        self.api_key = api_key or os.environ.get("SUPERDOCS_API_KEY")
+    def __init__(self, api_key: str | None = None,
+                 base_url: str | None = None) -> None:
+        """`api_key` and `base_url` override what the environment resolved to,
+        in that order of specificity.
+
+        The precedence rule itself lives in `resolve_superdocs` and is decided
+        by the environment, which is where a deployment configures it. These
+        two arguments are a seam for callers that already hold both halves --
+        the tests, and anything that wants to point one client somewhere
+        else -- so passing only `api_key` deliberately keeps the resolved base
+        rather than silently re-deciding it. Nothing in this build passes
+        either in production; `web.py` and `cli.py` construct it bare.
+        """
+        endpoint = resolve_superdocs()
+        self.api_key = api_key or endpoint.api_key or None
+        self.base = (base_url or endpoint.base_url).rstrip("/")
+        self.using_relay = endpoint.using_relay and not base_url
 
     def style(self, sent: bytes, filename: str = "recovered.docx",
               on_progress=None) -> "Styling":
@@ -283,11 +522,13 @@ class SuperDocsClient:
 
         if not self.api_key:
             r.note = (
-                "This copy of the page has no SuperDocs key set, so the file "
+                "This copy of the page has no SuperDocs key set and no relay "
+                "to borrow one from, so the file "
                 "below is the plain rebuild. It is complete and it is yours; "
                 "it just has not been through the styling pass."
             )
-            log.info("SUPERDOCS_API_KEY is not set; keeping the local rebuild.")
+            log.info("Neither SUPERDOCS_API_KEY nor RELAY_URL/RELAY_KEY is "
+                     "set; keeping the local rebuild.")
             return r
 
         try:
@@ -295,13 +536,16 @@ class SuperDocsClient:
             # "useful before doing work (to confirm you have operations left)",
             # and reads are free. Starting a pass that cannot finish would leave
             # somebody watching a progress line for work refused at the far end.
+            # Over relay this is also where the day's ration answers, which is
+            # why the sentence says which clock ran out rather than assuming
+            # the monthly one.
             left = self.allowance()
             r.allowance_known, r.allowance_remaining = left.known, left.remaining
             if left.known and left.remaining < 1:
                 r.note = (
-                    "The SuperDocs styling allowance for this month is used up, "
-                    "so nothing was sent and nothing was spent. The file below "
-                    "is the plain rebuild and it is still yours."
+                    f"The SuperDocs styling allowance for {left.period} is used "
+                    "up, so nothing was sent and nothing was spent. The file "
+                    "below is the plain rebuild and it is still yours."
                 )
                 say(r.note)
                 return r
@@ -352,6 +596,22 @@ class SuperDocsClient:
             say("Styled file ready.")
             return r
 
+        except RationExhausted:
+            # Told apart from every other 429 on purpose: this one does not
+            # come back with waiting, so offering "try again in a moment"
+            # would be a suggestion that cannot work. The two things that do
+            # work are named instead.
+            r.note = _RATION_NOTE
+        except QuotaExhausted:
+            # SuperDocs' own monthly quota. Same shape of sentence, different
+            # clock, and nothing to retry either.
+            r.note = ("The SuperDocs styling allowance for this month is used "
+                      "up, so the file below is the plain rebuild. It is "
+                      "complete and it is yours.")
+        except (RequestTooLarge, ModelNotAllowed) as exc:
+            r.note = ("The styling pass could not run because " + str(exc) +
+                      ". The file below is the plain rebuild and it is still "
+                      "yours.")
         except requests.Timeout:
             r.note = ("SuperDocs did not answer in time. The plain rebuild "
                       "below is unchanged and still yours — you can try the "
@@ -387,9 +647,19 @@ class SuperDocsClient:
         the work proceed and says the number is unknown, because refusing on a
         number nobody read would be its own kind of bluff.
         """
+        # Relay's daily ration is the same kind of ceiling as the monthly
+        # allowance -- a number that decides whether to send -- so it is
+        # answered from here rather than bolted on beside it. It cannot be
+        # read in advance: relay publishes no balance, so the only moment it
+        # is knowable is the moment relay says no, which `_note_ration_spent`
+        # remembers for the rest of the day. Until then this falls through to
+        # the monthly read below, which over relay reports the shared
+        # account's own quota -- a different ceiling, and a real one.
+        if self.using_relay and _ration_is_spent():
+            return Allowance(known=True, remaining=0, tier="relay",
+                             period="today")
         try:
-            resp = requests.get(f"{BASE}/v1/agents/whoami",
-                                headers=self._headers(), timeout=30)
+            resp = self._request("GET", "/v1/agents/whoami", timeout=30)
             resp.raise_for_status()
             quota = (resp.json() or {}).get("quota") or {}
             if "remaining" not in quota:
@@ -402,6 +672,72 @@ class SuperDocsClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"}
 
+    def _request(self, method: str, path: str, *, retry_5xx: bool = True,
+                 **kwargs):
+        """Every HTTP call this module makes, retried where retrying helps.
+
+        One funnel, for two reasons. The base and the key differ between the
+        origin and relay and are decided once here rather than at eleven call
+        sites. And a 429 has to be *read* rather than assumed: relay's daily
+        ration and relay's per-minute limiter arrive with the same status
+        code, and treating the first like the second means five attempts, a
+        held connection, and the same answer at the end of it.
+
+        The response comes back unraised: callers that read a status
+        themselves (`revert` reads 409 and 422) and callers that call
+        `raise_for_status` both keep working exactly as they did.
+
+        `retry_5xx=False` is how a *billable* write opts out of the timeout
+        and 5xx half of the policy. B30 and PRD §6: there is no idempotency
+        key on a SuperDocs write, so a 504 on `/v1/chat` may mean the edit
+        landed and the answer was lost, and repeating it would charge twice
+        for a document edited twice. Those calls are reconciled instead of
+        resent. The 429 half still applies to them, because every 429 on this
+        path -- relay's limiter, relay's ration, SuperDocs' quota -- is a
+        refusal taken before any work was done and so before anything was
+        charged.
+        """
+        import time
+
+        # Resolved from the module at call time, not bound at import: the
+        # suite patches `superdocs_client.requests` and must keep being able
+        # to.
+        send = requests.post if method == "POST" else requests.get
+        url = f"{self.base}{path}"
+        headers = {**self._headers(), **(kwargs.pop("headers", None) or {})}
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                resp = send(url, headers=headers, **kwargs)
+            except requests.Timeout:
+                # A timeout is the one transport failure worth repeating: the
+                # request may well have been received. A refused connection or
+                # an unresolvable host is a definitive no, and is left to
+                # raise on the first attempt rather than costing four more.
+                if attempt == MAX_ATTEMPTS or not retry_5xx:
+                    raise
+                time.sleep(min(_backoff(attempt), RETRY_SLEEP_CAP))
+                continue
+
+            status = getattr(resp, "status_code", 200)
+            if status == 429:
+                wait = _wait_for_429(resp)       # raises when it means stop
+            elif status in RETRY_STATUSES and retry_5xx:
+                wait = _retry_after(resp)
+            else:
+                if status in NEVER_RETRY_STATUSES:
+                    _named_refusal(resp)
+                return resp
+
+            if attempt == MAX_ATTEMPTS:
+                # Out of attempts: hand back the refusal itself so the
+                # caller's own `raise_for_status` says so, rather than
+                # inventing an exception the caller does not expect.
+                return resp
+            time.sleep(min(wait if wait is not None else _backoff(attempt),
+                           RETRY_SLEEP_CAP))
+        return resp
+
     def _upload_bytes(self, blob: bytes, filename: str, session_id: str) -> None:
         """Load the rebuilt document as the session's active editable document.
 
@@ -411,12 +747,12 @@ class SuperDocsClient:
         images to cloud storage and the export preserves them, so they survive
         without a separate image call.
         """
-        import io
-
-        resp = requests.post(
-            f"{BASE}/v1/documents/upload",
-            headers=self._headers(),
-            files={"file": (filename, io.BytesIO(blob))},
+        # The bytes go in directly rather than wrapped in a `BytesIO`: a
+        # stream is consumed by the first attempt, so a retry would upload an
+        # empty file and the session would style nothing at all.
+        resp = self._request(
+            "POST", "/v1/documents/upload",
+            files={"file": (filename, blob)},
             data={"session_id": session_id},
             timeout=REQUEST_TIMEOUT,
         )
@@ -425,32 +761,27 @@ class SuperDocsClient:
     def _upload(self, filepath: str, session_id: str) -> None:
         # Loads the local rebuild as the session's active, editable document.
         # Synchronous: the response returns the parsed HTML and the session_id.
+        # Read whole rather than streamed from the handle, for the same reason
+        # `_upload_bytes` does not wrap its blob: a retry re-sends the body,
+        # and a handle already at EOF would send nothing.
         path = Path(filepath)
-        with path.open("rb") as fh:
-            resp = requests.post(
-                f"{BASE}/v1/documents/upload",
-                headers=self._headers(),
-                files={"file": (path.name, fh)},
-                data={"session_id": session_id},
-                timeout=REQUEST_TIMEOUT,
-            )
-        resp.raise_for_status()
+        self._upload_bytes(path.read_bytes(), path.name, session_id)
 
     def _instruct(self, session_id: str) -> None:
         # Synchronous chat: the AI normalizes/restyles the session's document and
         # applies the change immediately (auto-approve). No approval step required.
-        requests.post(
-            f"{BASE}/v1/chat",
-            headers=self._headers(),
+        # Billable, so no 5xx retry: see `_request`. A 429 is still retried,
+        # because relay and SuperDocs alike refuse before charging.
+        self._request(
+            "POST", "/v1/chat", retry_5xx=False,
             json={"message": INSTRUCTION, "session_id": session_id},
             timeout=REQUEST_TIMEOUT,
         ).raise_for_status()
 
     def export(self, session_id: str) -> bytes | None:
         """The session's current document, as `.docx` bytes. Free (PRD §7)."""
-        resp = requests.post(
-            f"{BASE}/v1/documents/export",
-            headers=self._headers(),
+        resp = self._request(
+            "POST", "/v1/documents/export",
             json={"session_id": session_id, "format": "docx"},
             timeout=REQUEST_TIMEOUT,
         )
@@ -494,13 +825,8 @@ class SuperDocsClient:
         `/v1/chat` 504s past about 300 seconds, and there is no idempotency
         key on a billable write, so a turn that cannot be confirmed is
         reconciled against the session's own document version rather than
-        ever resent.
-
-        `approval_mode='ask_every_time'`, so this proposes and does not
-        apply. A clean run ends at `awaiting_approval` with `r.proposed` set
-        and the changes on `r.pending`; the person decides, and `decide()`
-        finishes it. `r.ok` is False here on every path -- nothing has landed
-        yet, and the counter must not say it has.
+        ever resent. `approval_mode` is never set -- edits auto-apply, and
+        the job must never reach `awaiting_approval`.
 
         `sent` is the version this turn started from (for the picture
         count) and `authorised` is the authorised word baseline (PRD §3) the
@@ -525,14 +851,12 @@ class SuperDocsClient:
 
         try:
             say("Sending your change to SuperDocs…")
-            resp = requests.post(
-                f"{BASE}/v1/chat/async",
-                headers=self._headers(),
+            # Billable, so no 5xx retry (B30): a turn that cannot be confirmed
+            # is reconciled below, never resent.
+            resp = self._request(
+                "POST", "/v1/chat/async", retry_5xx=False,
                 json={"session_id": session_id, "message": _bounded_turn(message),
-                      "response_mode": "compact",
-                      # The person wrote this instruction, so the person
-                      # decides whether the result is what they meant.
-                      "approval_mode": "ask_every_time"},
+                      "response_mode": "compact"},
                 timeout=30,
             )
             resp.raise_for_status()
@@ -540,31 +864,9 @@ class SuperDocsClient:
             if not job_id:
                 raise ValueError("no job id in the response")
 
-            say("Reading your document…")
-            body = self._await_job(job_id, say,
-                                   waiting_for="working out what would change")
+            say("Applying your change…")
+            body = self._await_job(job_id, say)
             status = (body or {}).get("status")
-
-            if status == "awaiting_approval":
-                r.job_id = job_id
-                r.pending = pending_changes(body)
-                if not r.pending:
-                    # Paused for a review with nothing to review. Nothing has
-                    # been applied, so there is nothing to undo -- but the job
-                    # would block the session until it is answered.
-                    self._deny_quietly(session_id, job_id)
-                    r.note = ("SuperDocs did not propose any change for that, "
-                              "so your document is unchanged. Try saying it "
-                              "another way.")
-                    say(r.note)
-                    return r
-                r.proposed = True
-                count = len(r.pending)
-                noun = "change" if count == 1 else "changes"
-                r.note = (f"SuperDocs proposes {count} {noun}. Nothing has "
-                          f"changed yet — read it and decide.")
-                say(r.note)
-                return r
 
             if status == "completed":
                 result = (body or {}).get("result") or {}
@@ -583,6 +885,31 @@ class SuperDocsClient:
             say(r.note)
             return r
 
+        except SuperDocsRefusal as exc:
+            # Not ambiguous and so not reconciled: a refusal means the turn
+            # was turned away before any work happened, and telling somebody
+            # "it may have landed, check back" about a request that was never
+            # accepted is the opposite of what they need to hear.
+            log.warning("SuperDocs turn refused (%s)", exc)
+            if isinstance(exc, (RationExhausted, QuotaExhausted)):
+                # The counter's own sentence for a ceiling, not the styling
+                # pass's: there is no "file below" here, and what the person
+                # needs is the same one line the pre-flight would have given
+                # them had the number been readable a moment earlier. Which
+                # clock ran out is the only difference.
+                from . import counter as _counter
+
+                r.note = _counter.no_allowance_left(
+                    "today" if isinstance(exc, RationExhausted) else "this month")
+            else:
+                # `RequestTooLarge` and `ModelNotAllowed` carry their own fix
+                # in the message, which is the whole reason they are separate
+                # from a bare transport failure.
+                r.note = ("That change could not be sent because " + str(exc) +
+                          ". Your document is unchanged.")
+            say(r.note)
+            return r
+
         except Exception as exc:  # noqa: BLE001 -- never raise out of a turn
             # Timeout, 5xx, an unreadable job: never resend. Reconcile
             # against the session's own document version instead.
@@ -591,125 +918,7 @@ class SuperDocsClient:
                                  authorised, say)
             return r
 
-    def decide(self, session_id: str, job_id: str, changes: list, approved: bool,
-               *, sent: bytes, authorised, on_progress=None) -> "Turn":
-        """Answer a review, and finish the turn if it was approved.
-
-        `POST /v1/chat/{session_id}/approve` carries the decision. Top-level
-        `approved` is required by the schema even on a batch -- omitting it is
-        a bare 422, and the docs name it as a common trap -- so it is always
-        sent, and every change carries its own copy.
-
-        Approval is asynchronous: the call returns, then the job resumes and
-        applies. Exporting before it settles exports the document without the
-        change in it, so this polls to `completed` first.
-
-        Never raises. Like `turn()`, every path leaves `note` set.
-        """
-        r = Turn()
-        r.job_id = job_id
-
-        def say(msg: str) -> None:
-            r.stages.append(msg)
-            if on_progress:
-                on_progress("Styling", msg)
-
-        before_version = self._version_id(session_id)
-
-        try:
-            say("Applying your change…" if approved else "Discarding that change…")
-            self._answer_review(session_id, job_id, changes, approved)
-
-            if not approved:
-                # Denied changes are not billed, and there is nothing to
-                # export: the document is exactly what it was.
-                self._settle(session_id, job_id, say)
-                r.note = ("Nothing was changed. That costs you nothing and "
-                          "does not use one of your changes.")
-                say(r.note)
-                return r
-
-            body = self._settle(session_id, job_id, say)
-            status = (body or {}).get("status")
-
-            if status == "completed":
-                result = (body or {}).get("result") or {}
-                turn_index = ((body or {}).get("metadata") or {}).get(
-                    "user_turn_index_pre_inserted")
-                self._finish_turn(r, session_id, sent, authorised, say,
-                                  turn_index=turn_index,
-                                  document_changes=result.get("document_changes"))
-                return r
-
-            r.note = ("SuperDocs could not apply that change, so your "
-                      "document is unchanged. You can try again.")
-            say(r.note)
-            return r
-
-        except Exception as exc:  # noqa: BLE001 -- never raise out of a decision
-            log.warning("SuperDocs decision could not be confirmed (%s)", exc)
-            if not approved:
-                # A deny that could not be confirmed changed nothing either
-                # way -- the only risk is a job still holding the session,
-                # and that expires on its own.
-                r.note = ("Nothing was changed. SuperDocs did not confirm "
-                          "that, so give it a moment before sending another "
-                          "change.")
-                say(r.note)
-                return r
-            self._reconcile_turn(r, session_id, before_version, sent,
-                                 authorised, say)
-            return r
-
-    def _answer_review(self, session_id: str, job_id: str, changes: list,
-                       approved: bool) -> None:
-        """The approve call itself. `changes` may be empty -- the top-level
-        decision then stands for the whole batch."""
-        payload: dict = {"job_id": job_id, "approved": bool(approved)}
-        ids = [c.get("change_id") for c in (changes or [])
-               if isinstance(c, dict) and c.get("change_id")]
-        if ids:
-            payload["changes"] = [{"change_id": cid, "approved": bool(approved)}
-                                  for cid in ids]
-        resp = requests.post(
-            f"{BASE}/v1/chat/{session_id}/approve",
-            headers=self._headers(), json=payload, timeout=30,
-        )
-        resp.raise_for_status()
-
-    def _settle(self, session_id: str, job_id: str, say) -> dict | None:
-        """Poll a decided job to a terminal state.
-
-        A denial with no feedback should end the job, but the platform is
-        allowed to come back with a revised proposal instead. Nothing is
-        waiting to answer a second one, so it is denied too -- bounded, so an
-        endlessly re-proposing job stops rather than spinning.
-        """
-        body = self._await_job(job_id, say)
-        rounds = 0
-        while (body or {}).get("status") == "awaiting_approval" and rounds < 2:
-            rounds += 1
-            self._answer_review(session_id, job_id,
-                                pending_changes(body), False)
-            body = self._await_job(job_id, say)
-        return body
-
-    def _deny_quietly(self, session_id: str, job_id: str) -> None:
-        """Clear a review nobody can answer -- a pause that proposed nothing.
-
-        Cancelling is what the docs point at for releasing a session held by a
-        pending approval; already-applied work is kept and pending changes are
-        discarded. Best effort: a job that cannot be cancelled expires on its
-        own within the hour.
-        """
-        try:
-            requests.post(f"{BASE}/v1/jobs/{job_id}/cancel",
-                          headers=self._headers(), timeout=30)
-        except Exception:  # noqa: BLE001
-            pass
-
-    def _await_job(self, job_id: str, say, *,
-                   waiting_for: str = "applying your change") -> dict | None:
+    def _await_job(self, job_id: str, say) -> dict | None:
         """Poll a chat job to a terminal state, with a small backoff. Emits a
         progress line while it runs (B5: stages are real, not simulated).
         Raises on a poll failure or a budget overrun -- caught by `turn`,
@@ -719,39 +928,26 @@ class SuperDocsClient:
         delay = JOB_POLL_INITIAL
         deadline = time.monotonic() + JOB_POLL_BUDGET
         while True:
-            resp = requests.get(f"{BASE}/v1/jobs/{job_id}",
-                                headers=self._headers(), timeout=30)
+            resp = self._request("GET", f"/v1/jobs/{job_id}", timeout=30)
             resp.raise_for_status()
             body = resp.json() or {}
             status = body.get("status")
             if status in ("completed", "failed", "cancelled"):
                 return body
             if status == "awaiting_approval":
-                # Two different pauses share this status, and answering the
-                # wrong one is a 409. Branch on `awaiting_kind` first.
-                kind = (body.get("metadata") or {}).get("awaiting_kind")
-                if kind == "continue_prompt":
-                    # A large edit applied what it could and is asking whether
-                    # to keep going. It carries no proposed changes, and is
-                    # resumed with `/v1/chat/{sid}/continue`, not `/approve`.
-                    # This build has no continue flow, so the job is asked to
-                    # stop rather than left running unattended -- and what it
-                    # already applied is kept, which the reconcile path finds.
-                    try:
-                        requests.post(f"{BASE}/v1/jobs/{job_id}/cancel",
-                                      headers=self._headers(), timeout=30)
-                    except Exception:  # noqa: BLE001
-                        pass
-                    raise TimeoutError("job paused to ask about continuing")
-                # A change review. This is the pause the counter asked for.
-                return body
+                # Should never happen -- approval_mode is never set on this
+                # path. Treated as unreadable rather than trusted, and the
+                # job is asked to stop rather than left running unattended.
+                try:
+                    self._request("POST", f"/v1/jobs/{job_id}/cancel",
+                                  timeout=30)
+                except Exception:  # noqa: BLE001
+                    pass
+                raise TimeoutError("job asked for approval unexpectedly")
             if time.monotonic() >= deadline:
                 raise TimeoutError("job poll exceeded its budget")
             progress = body.get("progress")
-            # Says what is actually happening: before a decision SuperDocs is
-            # working out what it would change, not changing anything. B5 --
-            # the stages are real, so they have to be true as well as timely.
-            say(f"Still {waiting_for}…" +
+            say("Still applying your change…" +
                 (f" {progress}%" if isinstance(progress, int) else ""))
             time.sleep(delay)
             delay = min(delay * 2, JOB_POLL_MAX)
@@ -845,11 +1041,8 @@ class SuperDocsClient:
         `{document_state, editor_action, messages, restore_error,
         session_id}`. Free. `None` when it could not be read."""
         try:
-            resp = requests.get(
-                f"{BASE}/v1/sessions/{session_id}/history",
-                headers=self._headers(),
-                timeout=30,
-            )
+            resp = self._request(
+                "GET", f"/v1/sessions/{session_id}/history", timeout=30)
             resp.raise_for_status()
             return resp.json() or {}
         except Exception as exc:  # noqa: BLE001
@@ -902,9 +1095,8 @@ class SuperDocsClient:
         """
         r = Reverted()
         try:
-            resp = requests.post(
-                f"{BASE}/v1/sessions/{session_id}/revert",
-                headers=self._headers(),
+            resp = self._request(
+                "POST", f"/v1/sessions/{session_id}/revert",
                 json={"turn_index": turn_index},
                 timeout=30,
             )
@@ -949,11 +1141,8 @@ class SuperDocsClient:
         wants `durable_document_id`, which only this free read
         (`GET /v1/sessions/{id}/documents`) carries."""
         try:
-            resp = requests.get(
-                f"{BASE}/v1/sessions/{session_id}/documents",
-                headers=self._headers(),
-                timeout=30,
-            )
+            resp = self._request(
+                "GET", f"/v1/sessions/{session_id}/documents", timeout=30)
             resp.raise_for_status()
             body = resp.json() or {}
             docs = body.get("documents") or []
@@ -980,11 +1169,8 @@ class SuperDocsClient:
             durable_id = self._durable_document_id(session_id)
             if not durable_id:
                 return None
-            resp = requests.get(
-                f"{BASE}/v1/documents/{durable_id}",
-                headers=self._headers(),
-                timeout=30,
-            )
+            resp = self._request(
+                "GET", f"/v1/documents/{durable_id}", timeout=30)
             resp.raise_for_status()
             body = resp.json() or {}
             return body.get("structure", body)

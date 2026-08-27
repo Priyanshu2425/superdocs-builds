@@ -142,9 +142,6 @@ let counter: {
   /** What `previewHtml` was before each applied turn, so a revert can hand
    *  the sheet back exactly what was on screen before that turn landed. */
   previewStack: string[];
-  /** A change waiting on a decision, or null. Set by a proposing turn and
-   *  cleared by `/approve` -- the same lifetime the server gives it. */
-  pendingReview: { asked: string; changes: unknown[] } | null;
 } = {
   turnsLeft: 10,
   turnsCap: 10,
@@ -155,7 +152,6 @@ let counter: {
   authoredWords: 0,
   previewHtml: "",
   previewStack: [],
-  pendingReview: null,
 };
 export function resetCounter(next: Partial<typeof counter> = {}) {
   counter = {
@@ -168,7 +164,6 @@ export function resetCounter(next: Partial<typeof counter> = {}) {
     authoredWords: 0,
     previewHtml: "",
     previewStack: [],
-    pendingReview: null,
     ...next,
   };
 }
@@ -182,18 +177,13 @@ let nextTurn: {
   applied: boolean;
   note: string;
   previewHtml?: string;
-  pending: null | { asked: string; changes: unknown[] };
 } = {
   stages: ["Sending your change to SuperDocs…"],
   applied: true,
   note: "Done.",
-  /** When set, the turn stops at a review instead of applying: nothing is
-   *  counted, no receipt is written, and the document is untouched until
-   *  `/approve` answers. */
-  pending: null as null | { asked: string; changes: unknown[] },
 };
 export function serveTurn(next: Partial<typeof nextTurn>) {
-  nextTurn = { ...nextTurn, pending: null, ...next };
+  nextTurn = { ...nextTurn, ...next };
 }
 
 /** Holds the next `/turn` response open until released -- so a test can
@@ -250,29 +240,6 @@ export const handlers = [
     const body = (await request.json()) as { message: string };
     if (turnGate) await turnGate;
     const turn = nextTurn;
-    if (turn.pending) {
-      // A proposal costs nothing and records nothing: it has not happened.
-      counter.pendingReview = { ...turn.pending, asked: body.message };
-      return sse([
-        ...turn.stages.map((m) =>
-          JSON.stringify({ stage: "superdocs", message: m }),
-        ),
-        JSON.stringify({
-          done: true,
-          applied: false,
-          proposed: true,
-          note: turn.note,
-          turns_left: counter.turnsLeft,
-          turns_cap: counter.turnsCap,
-          receipts: counter.receipts,
-          download: counter.download,
-          plain_download: counter.plainDownload,
-          authored_words: counter.authoredWords,
-          preview_html: "",
-          pending: counter.pendingReview,
-        }),
-      ]);
-    }
     counter.turnsLeft = Math.max(0, counter.turnsLeft - 1);
     const receipt = {
       asked: body.message,
@@ -301,56 +268,10 @@ export const handlers = [
       plain_download: counter.plainDownload,
       authored_words: counter.authoredWords,
       preview_html: turn.applied ? counter.previewHtml : "",
-      pending: null,
     };
     return sse([
       ...turn.stages.map((m) => JSON.stringify({ stage: "superdocs", message: m })),
       JSON.stringify(final),
-    ]);
-  }),
-
-  http.post("/api/style/:token/approve", async ({ request }) => {
-    const { approved } = (await request.json()) as { approved: boolean };
-    const review = counter.pendingReview;
-    counter.pendingReview = null;
-    if (approved) {
-      counter.turnsLeft = Math.max(0, counter.turnsLeft - 1);
-      counter.download = `/api/download/truncated-token-v${counter.receipts.length + 1}`;
-      counter.previewStack.push(counter.previewHtml);
-      counter.previewHtml = "<h2>Notes</h2>";
-    }
-    counter.receipts = [
-      ...counter.receipts,
-      {
-        asked: review?.asked ?? "",
-        note: approved
-          ? "SuperDocs applied your change."
-          : "Nothing was changed. That costs you nothing and does not use one of your changes.",
-        turn_index: counter.receipts.length + 1,
-        applied: approved,
-        supplied: null,
-      },
-    ];
-    return sse([
-      JSON.stringify({
-        stage: "superdocs",
-        message: approved ? "Applying your change…" : "Discarding that change…",
-      }),
-      JSON.stringify({
-        done: true,
-        applied: approved,
-        note: approved
-          ? "SuperDocs applied your change."
-          : "Nothing was changed. That costs you nothing and does not use one of your changes.",
-        turns_left: counter.turnsLeft,
-        turns_cap: counter.turnsCap,
-        receipts: counter.receipts,
-        download: counter.download,
-        plain_download: counter.plainDownload,
-        authored_words: counter.authoredWords,
-        preview_html: approved ? counter.previewHtml : "",
-        pending: null,
-      }),
     ]);
   }),
 
@@ -383,7 +304,6 @@ export const handlers = [
       plain_download: counter.plainDownload,
       authored_words: counter.authoredWords,
       preview_html: counter.previewHtml,
-      pending: counter.pendingReview,
     }),
   ),
 

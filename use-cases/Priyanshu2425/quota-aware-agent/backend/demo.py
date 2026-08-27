@@ -17,7 +17,6 @@ can see the behaviour without spending an operation.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -62,14 +61,21 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
 
     if a.live:
-        key = os.environ.get("SUPERDOCS_API_KEY")
-        if not key:
-            print("SUPERDOCS_API_KEY is not set. Run without --live to use the fake.",
-                  file=sys.stderr)
+        try:
+            transport = HttpTransport.from_env()
+        except RuntimeError as e:
+            print(f"{e}\n\nOr run without --live to use the fake, which costs "
+                  "nothing.", file=sys.stderr)
             return 2
-        transport = HttpTransport(key)
         sleep = None
-        print("Running against the real API. Operations will be billed.\n")
+        if transport.using_relay:
+            print(f"Running against the real API through the shared relay at "
+                  f"{transport.base}.\nOperations come out of its daily ration "
+                  f"of {transport.daily_ration}, shared by everyone using that "
+                  "key, and reset at 00:00 UTC.\n")
+        else:
+            print(f"Running against {transport.base} with your own key. "
+                  "Operations will be billed to your account.\n")
     else:
         from tests.fake import FakeSuperDocs
         transport = FakeSuperDocs(remaining=SCENARIOS[a.scenario])

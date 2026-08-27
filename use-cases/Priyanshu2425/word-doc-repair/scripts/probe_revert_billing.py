@@ -7,8 +7,25 @@ be the whole question.
 import json, os, sys, time
 import requests
 
-BASE = "https://api.superdocs.app"
-KEY = json.load(open(os.path.expanduser("~/.superdocs/agent_credentials.json")))["api_key"]
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "backend"))
+from docrepair.superdocs_client import resolve_superdocs  # noqa: E402
+
+# The same resolver the product uses, rather than a second copy of the base
+# and a key read straight off disk. A probe that reaches a different endpoint
+# than the thing it is probing measures the wrong endpoint -- and the numbers
+# below are only worth reading if they came from where the app goes.
+#
+# The agent-credentials file stays as the last resort: this script predates
+# both `.env` and the relay, and somebody running it on a machine set up that
+# way should not have to configure anything twice.
+_endpoint = resolve_superdocs()
+if _endpoint.available:
+    BASE, KEY = _endpoint.base_url, _endpoint.api_key
+else:
+    BASE = "https://api.superdocs.app"
+    KEY = json.load(open(os.path.expanduser(
+        "~/.superdocs/agent_credentials.json")))["api_key"]
 H = {"Authorization": f"Bearer {KEY}"}
 DOC = sys.argv[1]
 SID = f"revert-billing-probe-{int(time.time())}"

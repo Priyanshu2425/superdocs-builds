@@ -27,8 +27,7 @@ styling.
    could not be, and the rebuilt document itself rendered on the page before you
    decide whether to download it.
 5. **Let you set it your way.** The file arrives already styled — but if that is
-   not how you would have set it, say so in your own words. SuperDocs proposes
-   the change and stops; you read it and decide whether it lands.
+   not how you would have set it, say so in your own words and watch it change.
 
 ![The counter: the document on the left, one field and a ledger on the right](screenshot-counter.png)
 
@@ -38,13 +37,8 @@ A door beside the download, opening a conversation with SuperDocs about the
 document it just styled. Ask for smaller headings, tighter spacing, hairline
 table rules; the document answers and the sheet updates.
 
-Four things it does that a chat window normally does not:
+Three things it does that a chat window normally does not:
 
-- **It asks before it changes anything.** SuperDocs proposes; the page shows you
-  what it would change, the text as it stands beside the text it would become,
-  and the reason SuperDocs gave for each one. Your document is untouched until
-  you keep it. Discarding costs you nothing — not one of this document's
-  changes, and nothing on our side either.
 - **It shows the change, not a claim about it.** After a turn the page renders
   SuperDocs' own markup, so a formatting change is visible rather than asserted.
   A toggle puts *as it came back* beside *with your changes*.
@@ -65,10 +59,11 @@ that cannot be known.
 
 ## Run it
 
-Nothing here needs a key. The styling pass does; without one you get the plain
-rebuild and a line saying so.
+Nothing here needs a key of your own. The recovery is offline either way, and
+the styling pass runs on a shared relay until you give it something better.
 
 ```bash
+cp .env.example .env
 python3 -m venv .venv && ./.venv/bin/pip install -e ".[web,dev]"
 
 # the page
@@ -79,11 +74,48 @@ PYTHONPATH=backend ./.venv/bin/python backend/cli.py broken.docx
 PYTHONPATH=backend ./.venv/bin/python backend/cli.py broken.docx --local-only
 ```
 
-For the styling pass, put your key in `.env` at the project root:
+### Keys, and why you do not need one
+
+`cp .env.example .env` gives you a working build with no signup, because
+`.env.example` points the styling pass at **relay** — a small deployed worker
+that holds a SuperDocs key and lends it out under a ration. `RELAY_KEY` is not
+a secret and is committed on purpose; it is the thing that makes the copy step
+enough.
+
+What the shared path costs, per key per day:
+
+| | |
+|---|---|
+| SuperDocs operations | **460** |
+| requests per minute | **60** |
+| largest single request | **8 MB** |
+| resets | 00:00 UTC |
+
+Only document edits are charged. Uploads, exports, job polls and session reads
+are free, so one recovery spends one operation and each change you make at the
+counter spends one. Note the 8 MB request ceiling is tighter than the 20 MB
+document this page accepts: a very large `.docx` will be turned away by the
+relay and come back as the plain rebuild, with a line saying so.
+
+When the day's ration is gone, the recovery still works — you get the complete
+rebuilt document and a sentence explaining that the styling pass did not run.
+Nothing is ever silently downgraded.
+
+**To use your own key instead**, put it in `.env`:
 
 ```
 SUPERDOCS_API_KEY=sk_...
 ```
+
+That is not a convenience, it is the private path: with `SUPERDOCS_API_KEY`
+set, every request goes straight to `https://api.superdocs.app`, your key is
+never sent to the relay, and none of the limits above apply — the only ceiling
+left is your own SuperDocs allowance. `SUPERDOCS_BASE_URL` overrides the origin
+if you are pointed somewhere else.
+
+This build makes no LLM call of its own — the styling instruction is a fixed
+string in `superdocs_client.py`, not a model prompt — so the relay's model
+allowlist never comes into it.
 
 ## Try it on something broken
 
@@ -128,11 +160,11 @@ PYTHONPATH=backend ./.venv/bin/python -m docrepair.measure
 
 ## Tests
 
-**183 Python tests and 62 on the page. No key, no network.**
+**169 Python tests and 57 on the page. No key, no network.**
 
 ```bash
-./.venv/bin/python -m pytest tests/ -q      # 183
-cd frontend && npm install && npx vitest run # 62
+./.venv/bin/python -m pytest tests/ -q      # 169
+cd frontend && npm install && npx vitest run # 57
 ```
 
 The offline claim is checked the strong way rather than the convenient one: the
@@ -173,12 +205,7 @@ turn must turn its test red.
   undeclared. An undeclared part makes Word call the whole repaired document
   corrupt, and handing somebody a second broken file is worse than handing them
   one picture short with a line saying so.
-- **All four contract calls, and the approve step is a person.** At the counter
-  SuperDocs proposes and stops: you read what it would change and why, and
-  nothing reaches your document until you keep it. Discarding costs you nothing.
-  The automatic pass on the way in still applies its own formatting-only
-  instruction without asking — you have no basis to judge a change to a file you
-  dropped a second ago, and it guards its own output instead. See D1 in
+- **Three of the four contract calls.** No approve step; see D1 in
   [BASELINE.md](BASELINE.md).
 - **The counter refuses nothing for what you ask it.** The automatic pass still
   guards its own output — that is where the model acts with nobody watching. At

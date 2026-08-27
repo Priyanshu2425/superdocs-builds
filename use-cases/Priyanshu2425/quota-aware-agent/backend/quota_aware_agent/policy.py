@@ -35,6 +35,7 @@ class StopReason(str, Enum):
 
     COMPLETED = "completed"
     QUOTA_EXHAUSTED = "quota_exhausted"
+    RATION_EXHAUSTED = "ration_exhausted"
     RESERVE_FLOOR = "reserve_floor"
     NOTHING_FITS = "nothing_fits"
     REFUSED_PARTIAL = "refused_partial"
@@ -52,6 +53,14 @@ _WHY: dict[StopReason, str] = {
         "SuperDocs itself reported the allowance exhausted. That is the "
         "platform's own signal and the only authoritative one — our arithmetic "
         "never overrules it, and raising a number here would not help."
+    ),
+    StopReason.RATION_EXHAUSTED: (
+        "The shared relay lends the SuperDocs key under a daily ration and "
+        "today's is spent. This is a second ceiling sitting under the account's "
+        "own allowance, which may well be untouched — so the remedy is "
+        "different: set SUPERDOCS_API_KEY to your own key and the ration stops "
+        "applying, or wait for 00:00 UTC. The refused call was not billed, by "
+        "either of them."
     ),
     StopReason.RESERVE_FLOOR: (
         "The reserve was reached. It exists so the work already done can still "

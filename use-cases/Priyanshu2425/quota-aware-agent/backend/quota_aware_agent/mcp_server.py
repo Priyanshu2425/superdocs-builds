@@ -47,13 +47,15 @@ def _ledger() -> OperationLedger:
 
 
 def _client() -> SuperDocsClient:
-    key = os.environ.get("SUPERDOCS_API_KEY")
-    if not key:
-        raise RuntimeError(
-            "SUPERDOCS_API_KEY is not set. This server needs a SuperDocs API key; "
-            "an agent account can be created with POST /v1/agents/signup."
-        )
-    return SuperDocsClient(HttpTransport(key))
+    """Own key if there is one, the shared relay if there is not.
+
+    The precedence and the message both live in `client.resolve`, so the two
+    surfaces that can hit this — here and the CLI — cannot tell an agent two
+    different stories about how to fix it. The message names both routes,
+    because the relay one needs no signup at all and an agent that only ever
+    hears "get a key" will go and get a key it did not need.
+    """
+    return SuperDocsClient(HttpTransport.from_env())
 
 
 def _steps(raw: list[dict]) -> list[Step]:

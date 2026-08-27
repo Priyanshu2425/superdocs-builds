@@ -123,9 +123,29 @@ def supplied_text(message: str) -> str:
 # the decision is still written down where it can fail.
 
 
+def no_allowance_left(period: str = "this month") -> str:
+    """The one sentence for a ceiling that has been reached.
+
+    Its own function because there are now two ceilings of the same kind on
+    different clocks -- SuperDocs meters a month, the relay this build can
+    borrow a key from rations a day -- and they are reached in two places:
+    here, before anything is sent, and in `superdocs_client.turn`, when the
+    number only became readable because the far end refused. Two sentences
+    for one situation would drift, and the person would be told two different
+    things about the same "no".
+
+    What they are told does not name the mechanism either way. Somebody whose
+    file broke this morning did not arrive with an account, and a number
+    describing our metering is not something they can act on.
+    """
+    return (f"No more changes can be made here {period}. Your document is "
+            "unchanged and still yours to download.")
+
+
 def why_refused_before_sending(message: str, *, turns_left: int,
                                allowance_known: bool,
-                               allowance_remaining: int) -> str:
+                               allowance_remaining: int,
+                               period: str = "this month") -> str:
     """"" when the turn may be sent. Otherwise ONE consumer-facing sentence.
 
     Both remaining reasons are limits rather than judgements about what was
@@ -145,8 +165,10 @@ def why_refused_before_sending(message: str, *, turns_left: int,
     # not come here with an account, and has no use for a number that
     # describes ours.
     if allowance_known and allowance_remaining < 1:
-        return ("No more changes can be made here this month. Your document "
-                "is unchanged and still yours to download.")
+        # `period` is which clock ran out -- the month SuperDocs meters, or
+        # the day the relay rations. Defaulted rather than required so every
+        # existing caller keeps saying exactly what it said before.
+        return no_allowance_left(period)
 
     # No content check here any more. The owner's call, 2026-08-26: at the
     # counter the person is driving, and what they choose to ask SuperDocs

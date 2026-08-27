@@ -21,7 +21,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .budget import Balance, BudgetGuard, Change, Plan, estimate
-from .client import QuotaExhausted, SuperDocsClient, provably_never_sent
+from .client import (QuotaExhausted, RationExhausted, SuperDocsClient,
+                     provably_never_sent)
 from .idempotency import OperationLedger, State, operation_key
 from .policy import Policy, StopReason, WhenItDoesNotFit
 from .receipt import Receipt
@@ -149,7 +150,8 @@ class QuotaAwareAgent:
         and asking is itself a decision an agent should not have to make.
         """
         balance = self._g.remaining()
-        return {
+        ration = self._g.ration
+        hint = {
             "remaining_operations": balance.ops,
             "authoritative": balance.authoritative,
             "as_of": balance.as_of,
@@ -163,6 +165,28 @@ class QuotaAwareAgent:
                 "are free, which is why the reserve costs you nothing."
             ),
         }
+        if self._g.exhausted:
+            # Which ceiling stopped us, because the two have different remedies.
+            hint["exhausted_because"] = self._g.exhausted_because
+        if ration is not None:
+            # Only present when a second ceiling is actually in play. An agent
+            # planning against `remaining_operations` needs to know that number
+            # may be the ration rather than the account, or it will read a small
+            # number as "buy more allowance" when the answer is "use your own
+            # key, or come back after 00:00 UTC".
+            hint["daily_ration"] = {
+                "remaining_calls": ration.ops,
+                "resets_at": ration.as_of,
+                "source": ration.limited_by,
+                "binding": balance is ration,
+                "note": (
+                    "Counted in charged calls, not in SuperDocs operations, and "
+                    "never confirmed by the lender — it is an estimate until a "
+                    "refusal proves otherwise. Set SUPERDOCS_API_KEY to remove "
+                    "this ceiling entirely."
+                ),
+            }
+        return hint
 
     def settled(self, session_id: str, steps: list[Step]) -> tuple[
             list[Step], list[str], list[str]]:
@@ -193,18 +217,61 @@ class QuotaAwareAgent:
     # -- planning ---------------------------------------------------------
     def read_allowance(self) -> Balance:
         """The one moment the number is authoritative before any work begins."""
+        # A second ceiling, if the transport is lending us somebody else's key
+        # under a daily ration. Opened here rather than in the constructor
+        # because this is where the allowance is established, and the two are
+        # one question -- "how much may I spend?" -- with two answers that both
+        # have to be true. whoami is free on both sides, so this costs nothing.
+        ration = getattr(self._c, "daily_ration", None)
+        if ration is not None:
+            self._g.open_ration(ration)
         r = self._c.whoami()
         if r.usage.get("quota_exhausted") or getattr(self._c, "quota_exhausted", False):
             # whoami is free and is not refused by exhaustion, but the signal it
             # carries is the authoritative one and has to reach the planner.
             self._g.mark_exhausted()
-        quota = r.body.get("quota", {}) or {}
-        remaining = quota.get("remaining")
+        remaining, resets_at = self._balance_from_whoami(r.body)
         if remaining is None:
             # Never invent a balance. An unknown allowance is planned as zero,
-            # which degrades to doing nothing and saying why.
+            # which degrades to doing nothing and saying why -- loudly, because
+            # the alternative failure is the dangerous one: a build that reads
+            # nothing, plans against nothing, does nothing, and looks like a
+            # pass. It is not silent here; `fit` says there are no operations
+            # available to spend and the run reports having started nothing.
             return self._g.seed_from_whoami(0)
-        return self._g.seed_from_whoami(int(remaining), as_of=str(quota.get("resets_at", "")))
+        return self._g.seed_from_whoami(int(remaining), as_of=resets_at)
+
+    @staticmethod
+    def _balance_from_whoami(body: dict) -> tuple[int | None, str]:
+        """The remaining allowance, whichever shape whoami answered in.
+
+        Three shapes are real and the field name is not stable across them:
+
+          * `quota.remaining` -- what both the origin and the relay actually
+            return, verified live 2026-08-27. This is the one that matters.
+          * `remaining_operations` -- the flat form named in the API docs.
+          * `usage.monthly_remaining` -- the field that rides on chat responses,
+            in case whoami ever answers in the same vocabulary as everything
+            else.
+
+        Read as a list rather than as one field because the cost of guessing
+        wrong is not an error. It is `None`, which becomes a balance of zero,
+        which becomes a plan that fits nothing and a run that does nothing and
+        exits 0 -- an agent that quietly did not work looks exactly like an
+        agent with an empty allowance. The relay's key is not an agent account
+        (`is_agent_account: false`), so the shape it answers in is somebody
+        else's decision, not ours.
+        """
+        quota = body.get("quota") or {}
+        usage = body.get("usage") or {}
+        for value, resets_at in (
+            (quota.get("remaining"), quota.get("resets_at")),
+            (body.get("remaining_operations"), body.get("resets_at")),
+            (usage.get("monthly_remaining"), usage.get("resets_at")),
+        ):
+            if value is not None:
+                return int(value), str(resets_at or "")
+        return None, ""
 
     #: Each step is its own `POST /v1/chat/async`, so each one bills at least
     #: one operation. Pooling their sections and dividing by 25 -- which is
@@ -357,6 +424,18 @@ class QuotaAwareAgent:
 
             try:
                 self._run_step(session_id, step, report, key)
+            except RationExhausted as e:
+                # A different ceiling from the one below, with a different
+                # remedy, so it is never folded into it. The relay refused this
+                # call outright: nothing was sent upstream and nothing was
+                # billed by either the relay or SuperDocs.
+                self._g.ration_exhausted()
+                report.stop(StopReason.RATION_EXHAUSTED)
+                report.deferred.append(step.step_id)
+                report.say(
+                    f"Stopped at '{step.step_id}': {e}. The step was not "
+                    "started, so nothing is half-applied.")
+                return
             except QuotaExhausted:
                 report.stop(StopReason.QUOTA_EXHAUSTED)
                 report.deferred.append(step.step_id)
@@ -503,8 +582,19 @@ class QuotaAwareAgent:
 
         return pending_changes(job.body if hasattr(job, "body") else job)
 
+    #: The calls a lender charges its ration for: the chat instruction and the
+    #: re-edit an approval asks for. Deliberately the same set of paths the
+    #: relay bills (`client.relay_charges_for`) rather than the set SuperDocs
+    #: bills, because the two ceilings count different things -- SuperDocs
+    #: counts operations per 25 sections, a lender counts calls proxied.
+    RATIONED_CALLS = {"edit", "approve"}
+
     def _reconcile(self, response, report: Report, billable_ops: int = 0,
                    step_id: str = "", call: str = "") -> None:
+        if call in self.RATIONED_CALLS:
+            # Counted whether or not a usage block came back: the ration is a
+            # count of calls, and this call happened.
+            self._g.spend_ration(1)
         usage = response.usage
         if not usage:
             # A billable call that returned no usage block leaves us guessing.
