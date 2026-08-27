@@ -647,3 +647,79 @@ def test_proposed_markup_is_scrubbed_before_it_reaches_the_page(client, monkeypa
     # The words themselves survive -- scrubbing must not eat the diff.
     assert "before" in (change["old_html"] or "")
     assert "after" in (change["new_html"] or "")
+
+
+# -- opening twice --------------------------------------------------------------
+#
+# Found live: the page opened the counter twice (React re-mounts the screen in
+# development), the second open landed *after* a turn had already proposed a
+# change, and `_open_session` replaced the session -- so the review the person
+# was looking at no longer existed and deciding it answered 409.
+
+
+def test_opening_a_standing_counter_resumes_it_rather_than_replacing_it(
+        client, monkeypatch):
+    token, fake, final = _at_a_proposal(client, monkeypatch)
+    assert final["pending"] is not None
+
+    again = client.post(f"/api/style/{token}/open").json()
+
+    # Same conversation, not a fresh one: one upload, one session.
+    assert len(fake.open_calls) == 1
+    assert again["session"] == "fake-session-1"
+    # And the change waiting to be decided is still waiting.
+    state = client.get(f"/api/style/{token}/session").json()
+    assert state["pending"]["changes"][0]["change_id"] == "ch_1"
+    done = _sse_events(client.post(f"/api/style/{token}/approve",
+                                   json={"approved": True}))[-1]
+    assert done["applied"] is True
+
+
+def test_a_resumed_counter_keeps_its_receipts_and_its_count(client, monkeypatch):
+    payload, fake = _recover(client, monkeypatch)
+    token = payload["token"]
+    client.post(f"/api/style/{token}/open")
+    _sse_events(client.post(f"/api/style/{token}/turn",
+                            json={"message": "Make the headings bigger"}))
+
+    again = client.post(f"/api/style/{token}/open").json()
+
+    assert again["turns_left"] == web.TURNS_CAP - 1, "a resumed counter is not a fresh one"
+    assert [r["asked"] for r in again["receipts"]] == ["Make the headings bigger"]
+
+
+def test_two_opens_arriving_together_still_mint_one_session(client, monkeypatch):
+    """The live failure was a race, not a sequence: both opens were in flight
+    before either finished, so both found no session and both minted one."""
+    import threading
+
+    payload, fake = _recover(client, monkeypatch)
+    token = payload["token"]
+
+    started = threading.Barrier(2, timeout=5)
+    slow = threading.Event()
+    real_open = fake.open_session
+
+    def open_session(rebuild, filename="recovered.docx"):
+        # Hold the first opener inside the network call, which is where the
+        # second one used to slip past it.
+        slow.wait(timeout=2)
+        return real_open(rebuild, filename)
+
+    fake.open_session = open_session
+
+    results: list = []
+
+    def go():
+        started.wait()
+        results.append(client.post(f"/api/style/{token}/open").status_code)
+
+    threads = [threading.Thread(target=go) for _ in range(2)]
+    for t in threads:
+        t.start()
+    slow.set()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert results == [200, 200]
+    assert len(fake.open_calls) == 1, "the same document was uploaded twice"

@@ -126,6 +126,16 @@ _SESSIONS: dict[str, StyleSession] = {}
 #: state the session owns.
 _LATEST_DOWNLOAD: dict[str, str] = {}
 
+#: One lock per token, so opening two different documents at once does not
+#: queue. Guarded by its own lock because the registry itself is shared.
+_OPEN_LOCKS: dict[str, threading.Lock] = {}
+_OPEN_LOCKS_GUARD = threading.Lock()
+
+
+def _open_lock_for(token: str) -> threading.Lock:
+    with _OPEN_LOCKS_GUARD:
+        return _OPEN_LOCKS.setdefault(token, threading.Lock())
+
 
 def _sweep() -> None:
     """Idle expiry, actually enforced -- PRD §5's "retention gap".
@@ -408,38 +418,65 @@ def download(token: str) -> Response:
 # Added under the existing `POST /api/style/{token}` retry route, which stays
 # exactly as it is above. See docs/PRD-SET-IT-YOUR-WAY.md §12.
 
-def _open_session(token: str, client=None) -> dict:
-    """Open a SuperDocs conversation on a held rebuild. B22: the allowance is
-    read before anything else, and an unreadable balance is never zero."""
-    _sweep()
-    path = _READY.get(token)
-    if path is None:
-        raise HTTPException(404, NOT_HELD)
-
-    from docrepair.superdocs_client import SuperDocsClient
-
-    client = client or SuperDocsClient()
-    filename = Path(path).name or "recovered.docx"
-    rebuild = Path(path).read_bytes()
-
-    try:
-        allowance = client.allowance()
-        session_id = client.open_session(rebuild, filename)
-    except Exception:  # noqa: BLE001 -- never leak a stack trace to a consumer
-        raise HTTPException(
-            503, "The counter cannot be reached just now. Your document is unchanged.")
-
-    session = _SESSIONS[token] = StyleSession(
-        session_id=session_id, rebuild=rebuild, filename=filename,
-        dir=tempfile.mkdtemp(prefix="style-"),
-    )
+def _opened(token: str, session: StyleSession) -> dict:
+    """What opening a counter answers with, whether it was just minted or was
+    already standing."""
     return {
         "session": session.session_id,
         "turns_left": TURNS_CAP - session.turns_used,
         "turns_cap": TURNS_CAP,
         "retention_seconds": TTL_SECONDS,
-        "receipts": [],
+        "receipts": list(session.receipts),
     }
+
+
+def _open_session(token: str, client=None) -> dict:
+    """Open a SuperDocs conversation on a held rebuild. B22: the allowance is
+    read before anything else, and an unreadable balance is never zero.
+
+    Opening is idempotent, and has to be. A counter that is already standing
+    is *resumed*, never replaced: minting a second `StyleSession` for a token
+    throws away the receipts, the accepted versions, the words the person
+    supplied, and any change waiting to be decided -- and it uploads the same
+    document a second time to do it.
+
+    The lock is not belt-and-braces. Two opens for one token arrive together
+    in the ordinary case -- React re-mounts the screen in development, a
+    double click, a retry after a slow first attempt -- and both would find no
+    session and both would mint one. Held across the network calls on purpose:
+    the second request waits, then finds the first one's session and returns
+    it, which is the answer it wanted anyway.
+    """
+    _sweep()
+    path = _READY.get(token)
+    if path is None:
+        raise HTTPException(404, NOT_HELD)
+
+    with _open_lock_for(token):
+        standing = _SESSIONS.get(token)
+        if standing is not None:
+            standing.last_used_at = time.time()
+            return _opened(token, standing)
+
+        from docrepair.superdocs_client import SuperDocsClient
+
+        opener = client or SuperDocsClient()
+        filename = Path(path).name or "recovered.docx"
+        rebuild = Path(path).read_bytes()
+
+        try:
+            allowance = opener.allowance()
+            session_id = opener.open_session(rebuild, filename)
+        except Exception:  # noqa: BLE001 -- never leak a stack trace to a consumer
+            raise HTTPException(
+                503,
+                "The counter cannot be reached just now. Your document is unchanged.")
+
+        session = _SESSIONS[token] = StyleSession(
+            session_id=session_id, rebuild=rebuild, filename=filename,
+            dir=tempfile.mkdtemp(prefix="style-"),
+        )
+        return _opened(token, session)
 
 
 @app.post("/api/style/{token}/open")
