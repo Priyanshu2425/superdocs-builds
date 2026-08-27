@@ -177,7 +177,9 @@ def test_a_clean_turn_is_polled_exported_and_guarded(monkeypatch):
     def fake_post(url, **kwargs):
         if url == f"{client.base}/v1/chat/async":
             calls["chat_async"] += 1
-            assert "approval_mode" not in (kwargs.get("json") or {})
+            # Sent, not left to a default that moved under this path
+            # (see the approval test at the foot of this file).
+            assert (kwargs.get("json") or {}).get("approval_mode") == "approve_all"
             return FakeResponse(json_body={"job_id": "job-1", "status": "queued",
                                            "session_id": "sess-1",
                                            "message": "queued"})
@@ -488,3 +490,125 @@ def test_the_envelope_still_bounds_the_scope_of_a_turn():
         assert unrequested in lowered
     # And the reason the document is being handled carefully at all.
     assert "recovered from a damaged file" in lowered
+
+
+# -- a turn the platform pauses for approval ---------------------------------
+
+
+def _awaiting_body(changes: list[dict]) -> dict:
+    """A job parked at `awaiting_approval`, shaped like the live one measured
+    on 2026-08-27 (job 1ec43401, session salvage-55fd437f): the proposed edit
+    rides in `metadata.pending_changes`, and `result` is not populated yet."""
+    body = _job_body("awaiting_approval", progress=60)
+    body["result"] = None
+    body["metadata"] = {"user_turn_index_pre_inserted": 7,
+                        "pending_changes": changes,
+                        "response_mode": "compact"}
+    return body
+
+
+def test_a_turn_the_platform_pauses_for_approval_is_approved_and_lands(monkeypatch):
+    """The live API parks a `/v1/chat/async` job at `awaiting_approval` even
+    though this path never asks for review, and the edit sits there unapplied.
+
+    Treated as unreachable, it cost the person every message they sent: the
+    job was cancelled, the turn reconciled against a version id that had
+    correctly not moved, and they were told their change "did not come back in
+    time" -- about an edit SuperDocs was holding out for a yes.
+    """
+    client = sc.SuperDocsClient(api_key="sk_test")
+    sent = _doc("one two three")
+    authorised = ctr.baseline_from(sent)
+
+    calls = {"chat_async": 0, "approve": 0, "cancel": 0, "polls": 0}
+    approved_body = {}
+
+    def fake_post(url, **kwargs):
+        if url == f"{client.base}/v1/chat/async":
+            calls["chat_async"] += 1
+            # The intent this path has always documented, now actually said.
+            assert (kwargs.get("json") or {}).get("approval_mode") == "approve_all"
+            return FakeResponse(json_body={"job_id": "job-1", "status": "queued",
+                                           "session_id": "sess-1",
+                                           "message": "queued"})
+        if url == f"{client.base}/v1/chat/sess-1/approve":
+            calls["approve"] += 1
+            approved_body.update(kwargs.get("json") or {})
+            return FakeResponse(json_body={"status": "ok"})
+        if url.endswith("/cancel"):
+            calls["cancel"] += 1
+            return FakeResponse(json_body={"status": "cancelled"})
+        if url == f"{client.base}/v1/documents/export":
+            return FakeResponse(content=sent)
+        raise AssertionError(f"unexpected POST {url}")
+
+    def fake_get(url, **kwargs):
+        if url.startswith(f"{client.base}/v1/jobs/"):
+            calls["polls"] += 1
+            if calls["approve"] == 0:
+                return FakeResponse(json_body=_awaiting_body(
+                    [{"change_id": "ch_1", "chunk_id": "chunk-a"}]))
+            return FakeResponse(json_body=_job_body("completed", user_turn_index=3))
+        if url.startswith(f"{client.base}/v1/sessions/") and url.endswith("/history"):
+            return FakeResponse(json_body=_history_body("v-before"))
+        raise AssertionError(f"unexpected GET {url}")
+
+    monkeypatch.setattr(sc.requests, "post", fake_post)
+    monkeypatch.setattr(sc.requests, "get", fake_get)
+    monkeypatch.setattr(sc, "JOB_POLL_INITIAL", 0.0)
+
+    result = client.turn("sess-1", "Make the headings bold",
+                         sent=sent, authorised=authorised)
+
+    assert result.ok is True, result.note
+    assert result.reconciled is False
+    # The pending change was approved by change_id, against its own job.
+    assert calls["approve"] == 1
+    assert approved_body.get("job_id") == "job-1"
+    assert approved_body.get("changes") == [{"change_id": "ch_1", "approved": True}]
+    # And the job it was holding was never thrown away.
+    assert calls["cancel"] == 0
+    # Sent once. A pause is not a failure, and nothing here may resend a
+    # billable write (B30, PRD 6).
+    assert calls["chat_async"] == 1
+
+
+def test_a_paused_turn_with_nothing_to_approve_is_still_never_resent(monkeypatch):
+    """`awaiting_approval` carrying no change to approve is unreadable rather
+    than actionable. The job is stopped rather than left running unattended,
+    and the person is told plainly -- but the turn is still never sent twice."""
+    client = sc.SuperDocsClient(api_key="sk_test")
+    sent = _doc("one two three")
+    authorised = ctr.baseline_from(sent)
+
+    calls = {"chat_async": 0, "cancel": 0}
+
+    def fake_post(url, **kwargs):
+        if url == f"{client.base}/v1/chat/async":
+            calls["chat_async"] += 1
+            return FakeResponse(json_body={"job_id": "job-1", "status": "queued",
+                                           "session_id": "sess-1",
+                                           "message": "queued"})
+        if url.endswith("/cancel"):
+            calls["cancel"] += 1
+            return FakeResponse(json_body={"status": "cancelled"})
+        raise AssertionError(f"unexpected POST {url}")
+
+    def fake_get(url, **kwargs):
+        if url.startswith(f"{client.base}/v1/jobs/"):
+            return FakeResponse(json_body=_awaiting_body([]))
+        if url.startswith(f"{client.base}/v1/sessions/") and url.endswith("/history"):
+            return FakeResponse(json_body=_history_body("v-before"))
+        raise AssertionError(f"unexpected GET {url}")
+
+    monkeypatch.setattr(sc.requests, "post", fake_post)
+    monkeypatch.setattr(sc.requests, "get", fake_get)
+    monkeypatch.setattr(sc, "JOB_POLL_INITIAL", 0.0)
+
+    result = client.turn("sess-1", "Make the headings bold",
+                         sent=sent, authorised=authorised)
+
+    assert result.ok is False
+    assert calls["chat_async"] == 1
+    assert calls["cancel"] == 1
+    assert result.note

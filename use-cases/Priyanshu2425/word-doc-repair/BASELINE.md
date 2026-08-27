@@ -248,15 +248,24 @@ directory was a race the moment two recoveries overlapped.*
 
 Recorded here so they are decisions and not gaps.
 
-**D1 · Three of the four contract calls.** Section 07 of the brief names a
-four-call minimum: upload, chat, approve, export. This build makes upload, chat
-and export. The documented approve endpoint
-(`POST /v1/chat/{session_id}/approve`) exists only on the asynchronous
-`chat_async` path, reached with `approval_mode='ask_every_time'`; the
-synchronous `/v1/chat` used here applies its change inline. The decision taken
-was to trust the model on a formatting-only instruction and verify the result
-instead — **B20** does after the fact what approval would have done before it,
-on the artifact that actually ships. See BUG-097.
+**D1 · ~~Three of the four contract calls.~~ Closed 2026-08-27 — the build
+now makes all four.** Section 07 of the brief names a four-call minimum:
+upload, chat, approve, export.
+
+*This entry recorded a departure that no longer exists, and its premise was
+wrong. It held that `POST /v1/chat/{session_id}/approve` "exists only on the
+asynchronous `chat_async` path, reached with `approval_mode='ask_every_time'`".
+Measured on 2026-08-27, `/v1/chat/async` parked a job at `awaiting_approval`
+holding its edit with **no `approval_mode` set at all** (job `1ec43401`,
+`metadata.pending_changes` = 1) — and because the code was written around this
+departure, treating that state as unreachable, every message at the counter
+failed. That is BUG-112. `_await_job` now answers the pause by approving the
+change it names, so the fourth call is made on the conversational path.*
+
+The automatic styling pass is unchanged and still trusts the model on a
+formatting-only instruction and verifies the result: **B20** does after the
+fact what approval would have done before it, on the artifact that ships. See
+BUG-097.
 
 ## Known open, and not to be mistaken for baseline
 

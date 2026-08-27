@@ -323,6 +323,23 @@ def _named_refusal(resp) -> None:
         raise RationExhausted(_relay_message(body) or "the daily ration is spent")
 
 
+def _pending_changes(job_body: dict) -> list[dict]:
+    """The proposed changes a paused job is holding, each with a `change_id`.
+
+    Read defensively. `metadata.pending_changes` is where the live API puts
+    them (measured 2026-08-27), but a job parked with nothing readable there
+    is a job this code must not claim to have understood -- an empty list
+    sends `_await_job` down the "stop it and say so" path rather than
+    approving something it cannot name.
+    """
+    metadata = (job_body or {}).get("metadata") or {}
+    changes = metadata.get("pending_changes") or []
+    if not isinstance(changes, list):
+        return []
+    return [c for c in changes
+            if isinstance(c, dict) and c.get("change_id")]
+
+
 def _wait_for_429(resp) -> float | None:
     """Seconds to wait before retrying a 429 -- or a raise, when the 429 means
     stop. Four kinds arrive on this path and only two are worth another
@@ -825,8 +842,9 @@ class SuperDocsClient:
         `/v1/chat` 504s past about 300 seconds, and there is no idempotency
         key on a billable write, so a turn that cannot be confirmed is
         reconciled against the session's own document version rather than
-        ever resent. `approval_mode` is never set -- edits auto-apply, and
-        the job must never reach `awaiting_approval`.
+        ever resent. `approval_mode` is sent as `approve_all` -- the person
+        at the counter typed this instruction themselves -- and a job that
+        pauses for approval anyway is answered rather than abandoned.
 
         `sent` is the version this turn started from (for the picture
         count) and `authorised` is the authorised word baseline (PRD §3) the
@@ -856,7 +874,15 @@ class SuperDocsClient:
             resp = self._request(
                 "POST", "/v1/chat/async", retry_5xx=False,
                 json={"session_id": session_id, "message": _bounded_turn(message),
-                      "response_mode": "compact"},
+                      "response_mode": "compact",
+                      # Said rather than left to the default. The docs state
+                      # changes apply immediately unless review is asked for
+                      # (SuperDocs docs, "By default, the AI applies changes
+                      # immediately"), but a turn sent without this came back
+                      # parked at `awaiting_approval` holding its edit --
+                      # measured 2026-08-27, job 1ec43401. An unstated default
+                      # that moves is not a default this path can rest on.
+                      "approval_mode": "approve_all"},
                 timeout=30,
             )
             resp.raise_for_status()
@@ -865,7 +891,7 @@ class SuperDocsClient:
                 raise ValueError("no job id in the response")
 
             say("Applying your change…")
-            body = self._await_job(job_id, say)
+            body = self._await_job(job_id, say, session_id)
             status = (body or {}).get("status")
 
             if status == "completed":
@@ -918,7 +944,7 @@ class SuperDocsClient:
                                  authorised, say)
             return r
 
-    def _await_job(self, job_id: str, say) -> dict | None:
+    def _await_job(self, job_id: str, say, session_id: str) -> dict | None:
         """Poll a chat job to a terminal state, with a small backoff. Emits a
         progress line while it runs (B5: stages are real, not simulated).
         Raises on a poll failure or a budget overrun -- caught by `turn`,
@@ -935,15 +961,46 @@ class SuperDocsClient:
             if status in ("completed", "failed", "cancelled"):
                 return body
             if status == "awaiting_approval":
-                # Should never happen -- approval_mode is never set on this
-                # path. Treated as unreadable rather than trusted, and the
-                # job is asked to stop rather than left running unattended.
+                # The platform pauses here and holds the edit, even asked for
+                # `approve_all` -- so this is a real state on this path rather
+                # than the impossible one it was first written as. Read as
+                # impossible it cost every turn a person sent: the job was
+                # cancelled, the reconcile below found a version id that had
+                # correctly not moved, and they were told their change had not
+                # come back in time about an edit SuperDocs was holding out
+                # for a yes.
+                #
+                # Approving is not a judgement made on the person's behalf.
+                # This is the counter: they typed the instruction themselves a
+                # moment ago, and the owner's decision of 2026-08-26 is that
+                # what they ask for is theirs to ask (B20''). The word guard
+                # in `_finish_turn` still checks the result, and still says
+                # what changed.
+                changes = _pending_changes(body)
+                if changes:
+                    say("SuperDocs is holding your change for a yes — saying yes…")
+                    self._request(
+                        "POST", f"/v1/chat/{session_id}/approve",
+                        retry_5xx=False, timeout=30,
+                        json={"job_id": job_id, "approved": True,
+                              "changes": [{"change_id": c["change_id"],
+                                           "approved": True}
+                                          for c in changes]},
+                    ).raise_for_status()
+                    # Approval is asynchronous: the call returns and the job
+                    # resumes. Keep polling rather than exporting now.
+                    time.sleep(delay)
+                    delay = min(delay * 2, JOB_POLL_MAX)
+                    continue
+                # Paused with nothing to approve is unreadable rather than
+                # actionable, and the job is asked to stop rather than left
+                # running unattended.
                 try:
                     self._request("POST", f"/v1/jobs/{job_id}/cancel",
                                   timeout=30)
                 except Exception:  # noqa: BLE001
                     pass
-                raise TimeoutError("job asked for approval unexpectedly")
+                raise TimeoutError("job paused with no change to approve")
             if time.monotonic() >= deadline:
                 raise TimeoutError("job poll exceeded its budget")
             progress = body.get("progress")
