@@ -541,7 +541,8 @@ class SuperDocsClient:
                 raise ValueError("no job id in the response")
 
             say("Reading your document…")
-            body = self._await_job(job_id, say)
+            body = self._await_job(job_id, say,
+                                   waiting_for="working out what would change")
             status = (body or {}).get("status")
 
             if status == "awaiting_approval":
@@ -707,7 +708,8 @@ class SuperDocsClient:
         except Exception:  # noqa: BLE001
             pass
 
-    def _await_job(self, job_id: str, say) -> dict | None:
+    def _await_job(self, job_id: str, say, *,
+                   waiting_for: str = "applying your change") -> dict | None:
         """Poll a chat job to a terminal state, with a small backoff. Emits a
         progress line while it runs (B5: stages are real, not simulated).
         Raises on a poll failure or a budget overrun -- caught by `turn`,
@@ -746,7 +748,10 @@ class SuperDocsClient:
             if time.monotonic() >= deadline:
                 raise TimeoutError("job poll exceeded its budget")
             progress = body.get("progress")
-            say("Still applying your change…" +
+            # Says what is actually happening: before a decision SuperDocs is
+            # working out what it would change, not changing anything. B5 --
+            # the stages are real, so they have to be true as well as timely.
+            say(f"Still {waiting_for}…" +
                 (f" {progress}%" if isinstance(progress, int) else ""))
             time.sleep(delay)
             delay = min(delay * 2, JOB_POLL_MAX)
